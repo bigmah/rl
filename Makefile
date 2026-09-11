@@ -14,8 +14,8 @@ play: build
 
 # Extra flags pass through, e.g. make train ARGS="--train.total-timesteps 10_000_000"
 train: build
-	uv run puffer train platformer --slowly $(ARGS)
+	uv run python mlx_pufferl.py train platformer $(ARGS)
 
 # Watch the most recent checkpoint play (ESC to quit)
 eval: build
-	uv run puffer eval platformer --slowly --load-model-path latest --vec.total-agents 1 $(ARGS)
+	uv run python mlx_pufferl.py eval platformer --load-model-path latest --vec.total-agents 1 $(ARGS)

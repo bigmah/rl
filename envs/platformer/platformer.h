@@ -96,7 +96,7 @@ typedef struct {
     unsigned int rng;  // set by vecenv; the level is deterministic
     int frameskip;     // physics ticks per agent step
     int max_ticks;
-    float death_penalty;
+    float fail_penalty;  // for dying or running out of time
     Player player;
     float spawn_x, spawn_y;
     float goal_x;
@@ -287,7 +287,7 @@ void c_step(Platformer* env) {
         }
 
         if (outcome == TICK_DEATH) {
-            env->rewards[0] -= env->death_penalty;
+            env->rewards[0] -= env->fail_penalty;
             end_episode(env, outcome);
             return;
         }
@@ -297,6 +297,8 @@ void c_step(Platformer* env) {
             return;
         }
         if (env->tick >= env->max_ticks) {
+            // Same cost as dying: running out the clock never scores better than a failed jump
+            env->rewards[0] -= env->fail_penalty;
             end_episode(env, TICK_TIMEOUT);
             return;
         }

@@ -3,7 +3,10 @@ name = "rl"
 version = "0.1.0"
 description = "PufferLib experiments: a 2D platformer env trained with PuffeRL"
 requires-python = ">=3.12,<3.13"
-dependencies = ["pufferlib"]
+dependencies = [
+    "mlx>=0.32.2",
+    "pufferlib",
+]
 
 [tool.uv]
 package = false

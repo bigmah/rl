@@ -11,7 +11,7 @@ void my_init(Env* env, Dict* kwargs) {
     env->num_agents = 1;
     env->frameskip = dict_get(kwargs, "frameskip")->value;
     env->max_ticks = dict_get(kwargs, "max_ticks")->value;
-    env->death_penalty = dict_get(kwargs, "death_penalty")->value;
+    env->fail_penalty = dict_get(kwargs, "fail_penalty")->value;
     init(env);
 }
 
