@@ -1,0 +1,4 @@
+[submodule "vendor/PufferLib"]
+	path = vendor/PufferLib
+	url = https://github.com/PufferAI/PufferLib.git
+	branch = 4.0
