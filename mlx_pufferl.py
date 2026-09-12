@@ -220,7 +220,8 @@ class PuffeRL:
         self.last_log_time = time.time()
         self.start_time = time.time()
         self.losses = {}
-        self.env_logs = {}
+        self.env_sums = defaultdict(float)
+        self.env_episodes = 0.0
         self.perf = defaultdict(float)
 
     def _compile_act(self):
@@ -313,8 +314,23 @@ class PuffeRL:
         mx.eval(self.observations, self.actions, self.logprobs, self.values)
 
         self.global_step += N * H
-        self.env_logs = self._vec.log()
+        self._gather_env_logs()
         self.perf['rollout'] += time.perf_counter() - start
+
+    def _gather_env_logs(self):
+        '''The vecenv reports an average over the episodes that ended since it was last read, then
+        forgets them, and the CPU binding only exposes that resetting read. So keep the episode-weighted
+        sums here: log() reports and clears them like static_vec_log, and eval_log() reports and keeps
+        counting like static_vec_eval_log. Without the counting, env/n never passes eval_episodes and
+        eval runs every one of its train_epochs // 2 epochs'''
+        logs = self._vec.log()
+        episodes = logs.get('n', 0.0)
+        if not episodes:
+            return
+        for key, value in logs.items():
+            if key != 'n':
+                self.env_sums[key] += value * episodes
+        self.env_episodes += episodes
 
     def train(self):
         config = self.config
@@ -373,16 +389,22 @@ class PuffeRL:
         self.perf['train_forward'] += step_time
         self.perf['train_misc'] += elapsed - step_time
 
-    def log(self):
+    def log(self, reset_env=True):
         now = time.time()
         steps = self.global_step - self.last_log_step
         perf, self.perf = self.perf, defaultdict(float)
+        env = {}
+        if self.env_episodes:
+            env = {k: v / self.env_episodes for k, v in self.env_sums.items()}
+            env['n'] = self.env_episodes
+        if reset_env:
+            self.env_sums, self.env_episodes = defaultdict(float), 0.0
         logs = {
             'SPS': steps / (now - self.last_log_time) if steps else 0,
             'agent_steps': self.global_step,
             'uptime': now - self.start_time,
             'epoch': self.epoch,
-            'env': dict(self.env_logs),
+            'env': env,
             'loss': dict(self.losses),
             'perf': {k: perf[k] for k in PERF_KEYS},
             'util': {'vram_used_gb': mx.get_active_memory() / 1e9, 'vram_total_gb': self.memory_gb},
@@ -391,7 +413,8 @@ class PuffeRL:
         self.last_log_step = self.global_step
         return logs
 
-    eval_log = log
+    def eval_log(self):
+        return self.log(reset_env=False)
 
     def save_weights(self, path):
         # Write through a file handle so numpy keeps puffer's .bin filename
