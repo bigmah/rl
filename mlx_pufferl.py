@@ -173,6 +173,15 @@ def _buffer_view(ptr, shape, dtype):
     ctype = ctypes.c_uint8 if dtype == np.uint8 else ctypes.c_float
     return np.ctypeslib.as_array((ctype * count).from_address(ptr)).reshape(shape)
 
+def _most_trained_checkpoint(paths):
+    '''Puffer names a checkpoint after the agent step it was written at, so the most
+    trained one is the highest number and not the newest file. Picking by mtime loads
+    whatever ran last, which after a short run is a policy that knows nothing.'''
+    def key(path):
+        name = os.path.splitext(os.path.basename(path))[0]
+        return (int(name) if name.isdigit() else -1, os.path.getctime(path))
+    return max(paths, key=key)
+
 class PuffeRL:
     def __init__(self, args, vec, policy):
         config = args['train']
@@ -424,7 +433,8 @@ class PuffeRL:
             candidates = glob.glob(pattern, recursive=True)
             if not candidates:
                 raise FileNotFoundError(f'No .bin checkpoints found in {args["checkpoint_dir"]}/{args["env_name"]}/')
-            load_path = max(candidates, key=os.path.getctime)
+            load_path = _most_trained_checkpoint(candidates)
+            print(f'Loading {load_path}')
         if load_path is not None:
             pufferl.load_weights(load_path)
         return pufferl
