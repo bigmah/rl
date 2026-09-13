@@ -39,8 +39,8 @@ static SM64* make_env(int index, int window) {
 
 static void show(SM64* env, int step) {
     uint32_t action = sm64_action(env);
-    printf("step %5d  speed %6.2f/frame  fwd %7.2f  pos (%8.1f %7.1f %8.1f)  action %08x%s\n",
-           step, env->rewards[0] * env->speed_scale / (float)env->frameskip,
+    printf("step %5d  away %+6.2f/frame  covered %6.0f  fwd %7.2f  pos (%8.1f %7.1f %8.1f)  action %08x%s\n",
+           step, env->rewards[0] * env->speed_scale / (float)env->frameskip, env->covered,
            sm64_forward_vel(env), sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2), action,
            (action & ACT_FLAG_AIR) ? "  (in the air)" : "");
 }

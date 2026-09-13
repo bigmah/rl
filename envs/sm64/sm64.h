@@ -5,13 +5,16 @@
  * environment around it: what an action does to the controller, what Mario's
  * state is worth, and where all of that lives in the console's memory.
  *
- * Reward is how far Mario actually moved, horizontally, per frame. Not his
- * forward velocity -- that is what the game *believes* about him, and it can be
- * enormous while he stands still grinding into a wall, which is a reward for
- * the wrong thing. Distance covered cannot be faked: it counts a long jump
- * (about 48 units a frame), it counts a slope he slides down, and it counts
- * whatever exploit turns out to beat both. `forward_vel` is logged beside it so
- * the two can be compared.
+ * Reward is distance covered: how far Mario is, horizontally, from where the
+ * episode started, paid as it changes -- so an episode's return is where he
+ * ended up. Not the length of the path he ran: paid for that, a policy learned
+ * to run circles at top speed in a patch a thousand units wide, which is fast
+ * and goes nowhere. And not his forward velocity, which is what the game
+ * *believes* about him and can be enormous while he grinds into a wall.
+ * Distance covered cannot be faked: it counts a long jump (about 48 units a
+ * frame), it counts a slope he slides down, and it counts whatever exploit
+ * turns out to beat both. Path length and `forward_vel` are logged beside it so
+ * the three can be compared.
  *
  * Episodes start from a savestate of the castle grounds with Mario standing
  * outside the castle, so no episode spends its first thousand frames watching
@@ -118,6 +121,7 @@
 /* The observation, in the order it is written. */
 enum {
     OBS_POS_X, OBS_POS_Y, OBS_POS_Z,
+    OBS_AWAY_X, OBS_AWAY_Z, /* from where the episode started, which the reward is measured from */
     OBS_VEL_X, OBS_VEL_Y, OBS_VEL_Z,
     OBS_FORWARD_VEL,
     OBS_SPEED,
@@ -144,10 +148,11 @@ enum {
 /* Required struct. Only use floats! */
 typedef struct {
     float perf;            /* average speed as a fraction of a long jump's 48/frame */
-    float score;           /* average speed, units per frame */
+    float score;           /* average speed along his path, units per frame */
     float episode_return;
     float episode_length;  /* agent steps */
-    float distance;        /* units covered in the episode */
+    float covered;         /* how far from the start he ended up: what the reward pays for */
+    float distance;        /* the length of the path he ran to get there */
     float top_speed;       /* the best single frame of it */
     float forward_vel;     /* what the game thought his speed was, on average */
     float airborne;        /* fraction of frames off the ground */
@@ -175,6 +180,8 @@ typedef struct {
     int opened;
     uint32_t mario;       /* where MarioState is, read once from its pointer */
     float last_x, last_z;
+    float start_x, start_z; /* where he was when the policy took over */
+    float covered;          /* how far from there he is */
     int camera_offset;    /* between the stick and the world, worked out as we go */
     int last_stick_angle;
     int had_stick;
@@ -234,8 +241,13 @@ static void sm64_aim(SM64* env, int direction, float* stick_x, float* stick_y) {
     int angle = (wanted - env->camera_offset) & 0xFFFF;
     env->last_stick_angle = angle;
     env->had_stick = 1;
+    /* The game reads the stick as atan2s(-stickY, stickX): an angle whose sine is
+     * x and whose cosine is minus y. Sending cos for y hands it the mirror image
+     * of the angle, and a mirror is not an offset -- the measured "camera" then
+     * follows Mario's facing instead, "ahead" freezes the stick wherever it was,
+     * and every other direction thrashes it. */
     *stick_x = sinf(sm64_radians(angle));
-    *stick_y = cosf(sm64_radians(angle));
+    *stick_y = -cosf(sm64_radians(angle));
 }
 
 /* What the game made of the stick we sent, which is the camera plus a constant. */
@@ -355,6 +367,8 @@ static void sm64_write_observations(SM64* env, float speed) {
     obs[OBS_POS_X] = sm64_pos(env, 0) / 4000.0f;
     obs[OBS_POS_Y] = sm64_pos(env, 1) / 2000.0f;
     obs[OBS_POS_Z] = sm64_pos(env, 2) / 4000.0f;
+    obs[OBS_AWAY_X] = (sm64_pos(env, 0) - env->start_x) / 4000.0f;
+    obs[OBS_AWAY_Z] = (sm64_pos(env, 2) - env->start_z) / 4000.0f;
     obs[OBS_VEL_X] = sm64_vel(env, 0) / 60.0f;
     obs[OBS_VEL_Y] = sm64_vel(env, 1) / 60.0f;
     obs[OBS_VEL_Z] = sm64_vel(env, 2) / 60.0f;
@@ -433,6 +447,9 @@ void c_reset(SM64* env) {
     env->airborne_frames = 0;
     env->last_x = sm64_pos(env, 0);
     env->last_z = sm64_pos(env, 2);
+    env->start_x = env->last_x;
+    env->start_z = env->last_z;
+    env->covered = 0.0f;
     sm64_write_observations(env, 0.0f);
 }
 
@@ -443,6 +460,7 @@ static void sm64_end_episode(SM64* env, int early) {
     env->log.score += speed;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += (float)env->steps;
+    env->log.covered += env->covered;
     env->log.distance += env->distance;
     env->log.top_speed += env->top_speed;
     env->log.forward_vel += env->forward_vel_sum / frames;
@@ -503,7 +521,11 @@ void c_step(SM64* env) {
     if (speed > env->top_speed) {
         env->top_speed = speed;
     }
-    env->rewards[0] = moved / env->speed_scale;
+    /* Paid as the distance from the start changes, so running back toward it
+     * costs what running away earned and a circle earns nothing. */
+    float covered = sqrtf((x - env->start_x) * (x - env->start_x) + (z - env->start_z) * (z - env->start_z));
+    env->rewards[0] = (covered - env->covered) / env->speed_scale;
+    env->covered = covered;
     env->episode_return += env->rewards[0];
 
     if (env->tick >= env->max_ticks) {
