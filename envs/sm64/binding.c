@@ -57,7 +57,15 @@ void my_init(Env* env, Dict* kwargs) {
     env->frameskip = (int)dict_get(kwargs, "frameskip")->value;
     env->max_ticks = (int)dict_get(kwargs, "max_ticks")->value;
     env->random_start = (int)dict_get(kwargs, "random_start")->value;
-    env->speed_scale = (float)dict_get(kwargs, "speed_scale")->value;
+    env->time_penalty = (float)dict_get(kwargs, "time_penalty")->value;
+    env->novelty = (float)dict_get(kwargs, "novelty")->value;
+    env->novelty_episode = (float)dict_get(kwargs, "novelty_episode")->value;
+    env->novelty_cell = (float)dict_get(kwargs, "novelty_cell")->value;
+    env->go_explore = (float)dict_get(kwargs, "go_explore")->value;
+    env->go_explore_door = (float)dict_get(kwargs, "go_explore_door")->value;
+    env->backward = (float)dict_get(kwargs, "backward")->value;
+    env->backward_step = (int)dict_get(kwargs, "backward_step")->value;
+    env->backward_rate = (float)dict_get(kwargs, "backward_rate")->value;
     env->window = (int)dict_get(kwargs, "window")->value;
     init(env);
 }
@@ -67,10 +75,21 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "score", log->score);
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
-    dict_set(out, "covered", log->covered);
+    dict_set(out, "frames", log->frames);
+    dict_set(out, "closest", log->closest);
+    dict_set(out, "novelty", log->novelty);
+    dict_set(out, "cells", log->cells);
+    dict_set(out, "explored", log->explored);
+    dict_set(out, "from_start", log->from_start);
+    dict_set(out, "start_perf", log->start_perf);
+    dict_set(out, "archive", log->archive);
+    dict_set(out, "replayed", log->replayed);
+    dict_set(out, "door_cubes", log->door_cubes);
+    dict_set(out, "frontier", log->frontier);
     dict_set(out, "distance", log->distance);
     dict_set(out, "top_speed", log->top_speed);
     dict_set(out, "forward_vel", log->forward_vel);
     dict_set(out, "airborne", log->airborne);
+    dict_set(out, "dialog", log->dialog);
     dict_set(out, "ended_early", log->ended_early);
 }

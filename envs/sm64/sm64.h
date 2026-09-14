@@ -1,20 +1,88 @@
-/* Super Mario 64, as fast as Mario will go.
+/* Super Mario 64: open the castle's front door as soon as Mario can.
  *
  * The game is the real cartridge, statically recompiled to native arm64 by
  * N64Bundler and run in a process of its own (see n64b_gym.h). This file is the
  * environment around it: what an action does to the controller, what Mario's
  * state is worth, and where all of that lives in the console's memory.
  *
- * Reward is distance covered: how far Mario is, horizontally, from where the
- * episode started, paid as it changes -- so an episode's return is where he
- * ended up. Not the length of the path he ran: paid for that, a policy learned
- * to run circles at top speed in a patch a thousand units wide, which is fast
- * and goes nowhere. And not his forward velocity, which is what the game
- * *believes* about him and can be enormous while he grinds into a wall.
- * Distance covered cannot be faked: it counts a long jump (about 48 units a
- * frame), it counts a slope he slides down, and it counts whatever exploit
- * turns out to beat both. Path length and `forward_vel` are logged beside it so
- * the three can be compared.
+ * Reward is the door, the clock, and novelty. The door pays DOOR_REWARD and
+ * ends the episode the frame it starts to open. Every frame costs
+ * time_penalty / max_ticks, so an episode that runs out of time has paid
+ * time_penalty in all. Nothing tells the policy where the door is or pays for
+ * getting nearer to it: it sees what Mario is doing and where he is, and
+ * finds out about the door by opening it.
+ *
+ * The door is a long way to find by accident: 7600 units in a straight line,
+ * past a moat, over a bridge and through one of Lakitu's speeches, then walked
+ * into rather than dived at. 400 episodes of random buttons never opened it,
+ * and only one got as far as Lakitu. With the door and the clock alone, every
+ * episode is worth exactly -time_penalty until the first door, and 12M steps
+ * of training never found it: entropy stayed at its maximum, and the typical
+ * episode ended as far from the door as it began. Nothing in that setup
+ * remembers where Mario has been, so exploring is jittering the stick.
+ *
+ * Novelty is that memory, and it knows nothing about the door. The castle
+ * grounds are cut into cubes novelty_cell units a side. The first time in an
+ * episode that Mario enters a cube, he is paid
+ *
+ *     novelty_episode + novelty / sqrt(n)
+ *
+ * where n is how many episodes -- in every game this process runs -- have
+ * entered it, this one included. Only the first entry in an episode counts, so
+ * pacing across a boundary earns nothing.
+ *
+ * The second part is for places nobody has been. The start, which every
+ * episode sees, is worth almost nothing within minutes, and a cube nobody has
+ * reached pays all of it. On its own it found the door within 100K steps, and
+ * then lost it: by 500K the cubes on the way had been entered thousands of
+ * times, novelty had fallen from 0.7 an episode to 0.05, episodes drifted back
+ * to the start, and in 5M steps the door opened about five times -- too rarely
+ * for the policy to learn the bridge, Lakitu and the door from.
+ *
+ * The first part never fades: an episode that covers ground is always worth
+ * more than one that does not, so the far side of the grounds keeps being
+ * reached, and with it the door. It is small. 0.02 a cube is about what
+ * running costs in clock, so a run to the door -- fifteen cubes, the door, and
+ * the clock left over -- is still worth more than wandering all episode.
+ *
+ * Novelty with both parts did not get there either. By 10M steps its episodes
+ * ranged 3000 to 7700 units from the start, and the door opened once in a
+ * thousand. They swam: the moat wraps the castle, dozens of new cubes that
+ * lead nowhere near the door, while the way to it is a bridge of two cubes
+ * and then 250 frames of Lakitu with nothing new at all. Not one of eight
+ * traced episodes met Lakitu.
+ *
+ * So some episodes start further on (Go-Explore). Every cube any episode has
+ * entered is kept in an archive with the shortest run of pad inputs, from the
+ * savestate, that reached it. The game is deterministic -- 1400 random inputs
+ * replayed give the same Mario to the bit, in the same game or another -- so
+ * the inputs are the place, at a few kilobytes instead of a savestate's eight
+ * megabytes. A go_explore share of episodes pick a cube, weighted to the ones
+ * fewest episodes have entered, replay its inputs, and only then start the
+ * clock. The rest start where the task does. The reward is the same either
+ * way; only where some episodes begin has changed, and the log keeps the door
+ * rate from the real start apart (start_perf / from_start).
+ *
+ * Exploring is Go-Explore's first phase, and what it finds is a way to the
+ * door, not a policy that can open it from the start. Its second phase makes
+ * one: every exploring run that opens the door offers its inputs to a demo file, which
+ * keeps the fastest, and a `backward` share of episodes start on that demo,
+ * moving back from the door as the policy learns (see the fastest door).
+ *
+ * A death, or a warp out of the castle grounds, pays for the rest of the
+ * clock at once, so no episode is ever worth less than running it out, and
+ * none worth more: stopping the clock early is not a way to lose less.
+ *
+ * Two things stand between a fast runner and the door, both measured in the
+ * running game. The door opens only for a Mario who walks into it: a dive
+ * bonks off it and a punch does nothing. And Lakitu stops him the first time
+ * he steps onto the bridge, for about 250 frames of dialog even with A mashed.
+ * The episode goes on through that and the clock keeps running.
+ *
+ * An earlier version also paid for closing the straight-line distance to the
+ * door, and ended the episode in water so that distance could not lure Mario
+ * into the moat. It opened the door in 92% of episodes after 3M steps. This
+ * one is for finding out what that help was worth.
  *
  * Episodes start from a savestate of the castle grounds with Mario standing
  * outside the castle, so no episode spends its first thousand frames watching
@@ -29,7 +97,9 @@
 #ifndef SM64_H
 #define SM64_H
 
+#include <limits.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,7 +141,20 @@
 #define CURR_AREA_INDEX 0x8033BACA /* s16 */
 #define PLAYER1_CONTROLLER 0x8033AF90
 
+#define LEVEL_CASTLE 6 /* the inside, where the front door leads */
 #define LEVEL_CASTLE_GROUNDS 16
+
+/* The front door is two objects, its halves, at x -76 and 77, y 803, z -3155:
+ * found by searching memory for positions in front of the castle, then
+ * confirmed by walking into each. The left half is pushed and the right half
+ * pulled, and either way the game warps to LEVEL_CASTLE about forty frames
+ * later. */
+#define DOOR_X 0.0f
+#define DOOR_Z -3155.0f
+#define ACT_PULLING_DOOR 0x00001320
+#define ACT_PUSHING_DOOR 0x00001321
+/* As much as rewards are clipped to in a step: more would buy nothing. */
+#define DOOR_REWARD 1.0f
 
 /* struct MarioState */
 #define M_INPUT 0x02   /* u16 */
@@ -89,12 +172,12 @@
 #define M_CEIL_HEIGHT 0x6C
 #define M_FLOOR_HEIGHT 0x70
 #define M_WATER_LEVEL 0x76 /* s16 */
-#define M_HEALTH 0xAE      /* s16, 0x880 is full */
+#define M_HEALTH 0xAE      /* s16, 0x880 is full and under 0x100 is dead */
 #define SURFACE_NORMAL_Y 0x20 /* f32 inside struct Surface */
 
 /* An action is an index in its low bits, a group in 0x1C0, and flags above. */
 #define ACT_GROUP_MASK 0x1C0
-#define ACT_GROUP_CUTSCENE 0x100 /* dying, warping, star dances: not our episode */
+#define ACT_GROUP_CUTSCENE 0x100 /* dying, warping, doors, dialog */
 #define ACT_FLAG_STATIONARY (1 << 9)
 #define ACT_FLAG_MOVING (1 << 10)
 #define ACT_FLAG_AIR (1 << 11)
@@ -121,7 +204,6 @@
 /* The observation, in the order it is written. */
 enum {
     OBS_POS_X, OBS_POS_Y, OBS_POS_Z,
-    OBS_AWAY_X, OBS_AWAY_Z, /* from where the episode started, which the reward is measured from */
     OBS_VEL_X, OBS_VEL_Y, OBS_VEL_Z,
     OBS_FORWARD_VEL,
     OBS_SPEED,
@@ -147,16 +229,27 @@ enum {
 
 /* Required struct. Only use floats! */
 typedef struct {
-    float perf;            /* average speed as a fraction of a long jump's 48/frame */
-    float score;           /* average speed along his path, units per frame */
+    float perf;            /* fraction of episodes that opened the door */
+    float score;           /* fraction of the clock left when the door opened, 0 if it did not */
     float episode_return;
     float episode_length;  /* agent steps */
-    float covered;         /* how far from the start he ended up: what the reward pays for */
-    float distance;        /* the length of the path he ran to get there */
-    float top_speed;       /* the best single frame of it */
+    float frames;          /* frames to the door, the whole clock if it stayed shut: what is minimized */
+    float closest;         /* the nearest he came to the door without opening it (the bridge starts at 2980). Logged only: the policy never sees it */
+    float novelty;         /* what novelty paid this episode */
+    float cells;           /* cubes entered this episode */
+    float explored;        /* cubes any game has ever entered, as of the end of this episode */
+    float from_start;      /* fraction of episodes that began where the task does, not from the archive */
+    float start_perf;      /* fraction that began there and opened the door: the door rate is start_perf / from_start */
+    float archive;         /* cubes in the archive */
+    float replayed;        /* frames replayed to reach the episode's starting cube, 0 from the real start */
+    float door_cubes;      /* cubes that have been on the way to a door */
+    float frontier;        /* frames before the door that episodes on the demo start at, 0 with no demo */
+    float distance;        /* the length of the path he ran */
+    float top_speed;       /* the best single frame of it, units per frame */
     float forward_vel;     /* what the game thought his speed was, on average */
     float airborne;        /* fraction of frames off the ground */
-    float ended_early;     /* fraction of episodes cut short by a death or a warp */
+    float dialog;          /* fraction of frames in a cutscene, which out here means Lakitu */
+    float ended_early;     /* fraction of episodes cut short by a death or a warp that was not the door */
     float n;               /* Required as the last field */
 } Log;
 
@@ -173,25 +266,45 @@ typedef struct {
     int frameskip;        /* frames of the game per agent step */
     int max_ticks;        /* frames of the game per episode */
     int random_start;     /* frames of random stick held after loading the state */
-    float speed_scale;    /* units per frame that is worth 1.0 of reward */
+    float time_penalty;   /* reward the whole clock costs, spent a frame at a time */
+    float novelty;        /* reward for entering a cube no episode has entered before, fading as 1 / sqrt(episodes) */
+    float novelty_episode; /* reward for entering any cube for the first time this episode, which never fades */
+    float novelty_cell;   /* the side of a cube, in units */
+    float go_explore;     /* share of episodes that start from a cube in the archive */
+    float go_explore_door; /* share of those that start from a cube on the way to a door, once there is one */
+    float backward;       /* share of episodes that start on the demo, a little before the frontier */
+    int backward_step;    /* frames the frontier moves back at a time */
+    float backward_rate;  /* the door rate from the frontier that moves it back */
     int window;           /* draw the game, for watching a policy play */
 
     N64Gym gym;
     int opened;
     uint32_t mario;       /* where MarioState is, read once from its pointer */
     float last_x, last_z;
-    float start_x, start_z; /* where he was when the policy took over */
-    float covered;          /* how far from there he is */
+    float closest;        /* the nearest he has come to the door, for the log */
+    uint32_t episode;     /* counts up from 1, to mark which cubes this episode has entered */
+    uint32_t* entered;    /* the episode that last entered each cube */
+    float novelty_earned;
+    int cells_entered;
+    struct SM64Input* trail; /* every pad input since the savestate, replayed ones first */
+    int trail_count, trail_capacity, trail_frames;
+    int from_start;
+    int start_cube;       /* the archive cube this episode began in, or -1 */
+    int start_frontier;   /* the frontier this episode began at on the demo, or -1 */
+    int replayed_frames;
+    unsigned seed;
     int camera_offset;    /* between the stick and the world, worked out as we go */
     int last_stick_angle;
     int had_stick;
-    int tick;             /* frames this episode */
+    int tick;             /* frames on the clock */
+    int start_tick;       /* where the clock started: 0, or partway for an episode on the demo */
     int steps;
     float episode_return;
     float distance;
     float top_speed;
     float forward_vel_sum;
     int airborne_frames;
+    int dialog_frames;
     double next_frame_time; /* for watching it at the speed a television would */
 } SM64;
 
@@ -214,6 +327,221 @@ static inline int sm64_level(SM64* env) { return n64_s16(&env->gym, CURR_LEVEL_N
 
 /* An angle the game's way: a signed 16-bit turn of the whole circle. */
 static inline float sm64_radians(int angle) { return (float)angle * (2.0f * (float)M_PI / 65536.0f); }
+
+/* How far Mario is from the door, across the ground. For the log, never the policy. */
+static inline float sm64_door_distance(float x, float z) {
+    return sqrtf((DOOR_X - x) * (DOOR_X - x) + (DOOR_Z - z) * (DOOR_Z - z));
+}
+
+/* --- novelty ------------------------------------------------------------------
+ *
+ * Cubes over the whole of a level's space: x and z from -8192 to 8192, y from
+ * -4096 to 8192. The visit counts are one table for the process, because the
+ * games stepping in parallel are exploring the same grounds, and a cube one of
+ * them has worn out is not new to the others. Increments race between threads,
+ * so they are atomic.
+ */
+#define NOVELTY_MIN_CELL 250.0f
+#define NOVELTY_MAX_XZ 66 /* 16384 / NOVELTY_MIN_CELL, rounded up */
+#define NOVELTY_MAX_Y 50  /* 12288 / NOVELTY_MIN_CELL, rounded up */
+#define NOVELTY_CUBES (NOVELTY_MAX_XZ * NOVELTY_MAX_XZ * NOVELTY_MAX_Y)
+
+static uint32_t sm64_cube_visits[NOVELTY_CUBES];
+static uint32_t sm64_cubes_explored;
+
+/* Which cube a place is in, or -1 outside the level's space. */
+static inline int sm64_cube(const SM64* env, float x, float y, float z) {
+    float side = fmaxf(env->novelty_cell, NOVELTY_MIN_CELL);
+    int i = (int)floorf((x + 8192.0f) / side);
+    int j = (int)floorf((y + 4096.0f) / side);
+    int k = (int)floorf((z + 8192.0f) / side);
+    if (i < 0 || j < 0 || k < 0 || i >= NOVELTY_MAX_XZ || k >= NOVELTY_MAX_XZ || j >= NOVELTY_MAX_Y) {
+        return -1;
+    }
+    return (j * NOVELTY_MAX_XZ + k) * NOVELTY_MAX_XZ + i;
+}
+
+/* Novelty's pay for being where Mario is now: something the first time this
+ * episode he is in a cube, nothing after. */
+/* --- the archive (Go-Explore) ------------------------------------------------
+ *
+ * For every cube, the shortest run of pad inputs from the savestate that has
+ * reached it. One archive for the process, like the visit counts, behind a
+ * lock: the games reset and step in parallel. A run longer than
+ * ARCHIVE_MAX_FRAMES is not kept, so no reset replays more than that.
+ */
+typedef struct SM64Input {
+    uint16_t buttons;
+    uint16_t frames;
+    float stick_x, stick_y;
+} SM64Input;
+
+typedef struct {
+    SM64Input* inputs;
+    int count;
+    int frames;
+} SM64Cell;
+
+#define ARCHIVE_MAX_FRAMES 2700
+
+static SM64Cell sm64_archive[NOVELTY_CUBES];
+static int sm64_archive_cubes[NOVELTY_CUBES]; /* the cubes that have a run, in the order they got one */
+static int sm64_archive_size;
+static pthread_mutex_t sm64_archive_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void sm64_trail_push(SM64* env, uint16_t buttons, int frames, float stick_x, float stick_y) {
+    if (env->trail_count == env->trail_capacity) {
+        env->trail_capacity = env->trail_capacity ? env->trail_capacity * 2 : 1024;
+        env->trail = (SM64Input*)realloc(env->trail, (size_t)env->trail_capacity * sizeof(SM64Input));
+    }
+    env->trail[env->trail_count++] = (SM64Input){buttons, (uint16_t)frames, stick_x, stick_y};
+    env->trail_frames += frames;
+}
+
+static void sm64_watch_camera(SM64* env);
+
+/* Play the trail into the game, from the savestate: the start of an episode
+ * that begins further on. The cubes it passes through count as this episode's,
+ * so a door from here credits them too. (The episode number goes up once reset
+ * is done, hence + 1.) They pay no novelty: the policy did not walk them. */
+static void sm64_replay_trail(SM64* env) {
+    for (int k = 0; k < env->trail_count; k++) {
+        const SM64Input* input = &env->trail[k];
+        n64gym_pad(&env->gym, input->buttons, input->stick_x, input->stick_y);
+        if (!n64gym_step(&env->gym, input->frames)) {
+            fprintf(stderr, "sm64: the game stopped while replaying a way further on: %s\n", env->gym.error);
+            exit(1);
+        }
+        /* Keep up with the camera, as a step does: otherwise the policy's first
+         * stick after the replay is aimed off by wherever the camera had turned. */
+        env->had_stick = input->stick_x != 0.0f || input->stick_y != 0.0f;
+        if (env->had_stick) {
+            float angle = atan2f(input->stick_x, -input->stick_y) * (65536.0f / (2.0f * (float)M_PI));
+            env->last_stick_angle = (int)lroundf(angle) & 0xFFFF;
+            sm64_watch_camera(env);
+        }
+        int passed = sm64_cube(env, sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2));
+        if (passed >= 0) {
+            env->entered[passed] = env->episode + 1;
+        }
+    }
+}
+
+/* This episode has just reached a cube: keep how, if it is the first way or a shorter one. */
+static void sm64_archive_offer(SM64* env, int cube) {
+    if (env->trail_frames > ARCHIVE_MAX_FRAMES) {
+        return;
+    }
+    pthread_mutex_lock(&sm64_archive_lock);
+    SM64Cell* cell = &sm64_archive[cube];
+    if (cell->inputs == NULL || env->trail_frames < cell->frames) {
+        SM64Input* inputs = (SM64Input*)malloc((size_t)env->trail_count * sizeof(SM64Input));
+        memcpy(inputs, env->trail, (size_t)env->trail_count * sizeof(SM64Input));
+        if (cell->inputs == NULL) {
+            sm64_archive_cubes[sm64_archive_size++] = cube;
+        }
+        free(cell->inputs);
+        cell->inputs = inputs;
+        cell->count = env->trail_count;
+        cell->frames = env->trail_frames;
+    }
+    pthread_mutex_unlock(&sm64_archive_lock);
+}
+
+/* Start from a cube in the archive, weighted to the ones fewest episodes have
+ * entered: copy its run onto this episode's trail and replay it. The game is
+ * left where that run left it. Returns the cube, or -1 if the archive is empty. */
+/* Which cubes have been on the way to the door, and how many episodes have
+ * started from each. Rarity alone was not enough: after 8M steps of starting
+ * from the cubes fewest episodes had entered -- far corners of the moat and the
+ * lake, mostly -- the door opened once in a thousand, from either kind of
+ * start. So once an episode has opened the door, every cube it passed through,
+ * the replayed part included, is credited, and a go_explore_door share of
+ * archive starts are drawn from those cubes, least started-from first: all the
+ * way along some path to the door, from near the start to the step before it.
+ * That is still only the reward speaking. Nothing says where the door is. */
+static uint32_t sm64_cube_doors[NOVELTY_CUBES];
+static uint32_t sm64_cube_starts[NOVELTY_CUBES];
+static int sm64_door_cubes[NOVELTY_CUBES];
+static int sm64_door_cube_count;
+
+/* Draw a cube from a list, each weighted 1 / sqrt(1 + its count). Call with the lock held. */
+static int sm64_draw(SM64* env, const int* cubes, int count, const uint32_t* counts) {
+    double total = 0.0;
+    for (int k = 0; k < count; k++) {
+        total += 1.0 / sqrt(1.0 + (double)counts[cubes[k]]);
+    }
+    double pick = total * ((double)rand_r(&env->seed) / ((double)RAND_MAX + 1.0));
+    for (int k = 0; k < count; k++) {
+        pick -= 1.0 / sqrt(1.0 + (double)counts[cubes[k]]);
+        if (pick < 0.0) {
+            return cubes[k];
+        }
+    }
+    return cubes[count - 1];
+}
+
+/* The episode has opened the door: credit every cube it was in. */
+static void sm64_credit_door(SM64* env, int door_cube) {
+    if (door_cube >= 0) {
+        env->entered[door_cube] = env->episode;
+    }
+    pthread_mutex_lock(&sm64_archive_lock);
+    for (int cube = 0; cube < NOVELTY_CUBES; cube++) {
+        if (env->entered[cube] != env->episode || sm64_archive[cube].inputs == NULL) {
+            continue;
+        }
+        if (sm64_cube_doors[cube]++ == 0) {
+            sm64_door_cubes[sm64_door_cube_count++] = cube;
+        }
+    }
+    pthread_mutex_unlock(&sm64_archive_lock);
+}
+
+static int sm64_archive_start(SM64* env) {
+    pthread_mutex_lock(&sm64_archive_lock);
+    if (sm64_archive_size == 0) {
+        pthread_mutex_unlock(&sm64_archive_lock);
+        return -1;
+    }
+    int cube;
+    if (sm64_door_cube_count > 0 &&
+        (double)rand_r(&env->seed) / ((double)RAND_MAX + 1.0) < env->go_explore_door) {
+        cube = sm64_draw(env, sm64_door_cubes, sm64_door_cube_count, sm64_cube_starts);
+    } else {
+        cube = sm64_draw(env, sm64_archive_cubes, sm64_archive_size, sm64_cube_visits);
+    }
+    sm64_cube_starts[cube]++;
+    SM64Cell* cell = &sm64_archive[cube];
+    env->trail_count = 0;
+    env->trail_frames = 0;
+    for (int k = 0; k < cell->count; k++) {
+        const SM64Input* input = &cell->inputs[k];
+        sm64_trail_push(env, input->buttons, input->frames, input->stick_x, input->stick_y);
+    }
+    pthread_mutex_unlock(&sm64_archive_lock);
+    sm64_replay_trail(env);
+    return cube;
+}
+
+static float sm64_novelty(SM64* env, float x, float y, float z) {
+    int cube = sm64_cube(env, x, y, z);
+    if (cube < 0 || env->entered[cube] == env->episode) {
+        return 0.0f;
+    }
+    env->entered[cube] = env->episode;
+    env->cells_entered++;
+    uint32_t visits = __sync_add_and_fetch(&sm64_cube_visits[cube], 1);
+    if (visits == 1) {
+        __sync_add_and_fetch(&sm64_cubes_explored, 1);
+    }
+    if (env->go_explore > 0.0f) {
+        sm64_archive_offer(env, cube);
+    }
+    float bonus = env->novelty_episode + env->novelty / sqrtf((float)visits);
+    env->novelty_earned += bonus;
+    return bonus;
+}
 
 /* --- the controller ---------------------------------------------------------
  *
@@ -319,6 +647,186 @@ static const char* sm64_setting(const char* name, const char* fallback) {
     return (found != NULL && found[0] != '\0') ? found : fallback;
 }
 
+/* --- the fastest door (Go-Explore's second phase) ----------------------------
+ *
+ * The archive reaches the door by replaying inputs, which works only because
+ * the game is deterministic. A policy started from the castle grounds has never
+ * seen most of that way, so the second phase trains one to repeat it:
+ * robustifying, with the backward algorithm (Salimans and Chen, 2018), which is
+ * what Go-Explore used.
+ *
+ * Every exploring run (go_explore on) that opens the door offers its inputs,
+ * from the savestate, to the demo file (SM64_DEMO), which keeps the fastest
+ * door any of them has found. A `backward` share of episodes replay that demo
+ * up to somewhere between the frontier and backward_step frames nearer the
+ * door, and play from there. The frontier begins backward_step frames before
+ * the door. Once backward_rate of
+ * a window of episodes started from it open the door, it moves backward_step
+ * frames further back, until it is the start of the demo. The rest of the
+ * episodes start where the task does, so start_perf / from_start is still the
+ * door rate that counts.
+ *
+ * Half the episodes on the demo start anywhere between the frontier and the
+ * door instead, and do not count toward moving it, so what the policy has
+ * already learned keeps being paid for. Without them, the first run's frontier
+ * went from 30 frames to 180 in 165K steps, into Lakitu's speech (348 to 102
+ * frames before the door in that demo), and stopped there. Every episode on
+ * the demo then started where the policy could not yet win, and by 200K steps
+ * it played at random (entropy 4.3 of 4.9) and opened nothing.
+ *
+ * The demo a run robustifies is the one on file when it starts.
+ */
+#define SM64_DEMO_MAGIC "SM64DEMO"
+#define BACKWARD_WINDOW 32
+#define DEMO_SLACK 300 /* frames: ten seconds more than the demo took */
+
+typedef struct {
+    char magic[8];
+    int32_t count;  /* inputs */
+    int32_t frames; /* from the savestate to the frame the door starts to open */
+} SM64DemoHeader;
+
+static SM64Input* sm64_demo;      /* what this run robustifies, read once */
+static int sm64_demo_count, sm64_demo_frames;
+static int sm64_demo_best = -1;   /* frames of the fastest door on file, once it has been looked at */
+static int sm64_frontier;         /* frames before the door */
+static int sm64_frontier_tries, sm64_frontier_doors;
+static pthread_mutex_t sm64_demo_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static const char* sm64_demo_path(void) { return sm64_setting("SM64_DEMO", SM64_DEMO); }
+
+/* A demo's inputs, or NULL if the file has none. */
+static SM64Input* sm64_demo_read(const char* path, int* count, int* frames) {
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) {
+        return NULL;
+    }
+    SM64DemoHeader header;
+    SM64Input* inputs = NULL;
+    if (fread(&header, sizeof(header), 1, file) == 1 &&
+        memcmp(header.magic, SM64_DEMO_MAGIC, sizeof(header.magic)) == 0 && header.count > 0) {
+        inputs = (SM64Input*)malloc((size_t)header.count * sizeof(SM64Input));
+        if (fread(inputs, sizeof(SM64Input), (size_t)header.count, file) != (size_t)header.count) {
+            free(inputs);
+            inputs = NULL;
+        }
+    }
+    fclose(file);
+    if (inputs != NULL) {
+        *count = header.count;
+        *frames = header.frames;
+    }
+    return inputs;
+}
+
+/* This episode has opened the door: if no run on file was faster, it is the demo
+ * now. Written beside the file and renamed over it, so a reader never sees half. */
+static void sm64_demo_offer(SM64* env) {
+    pthread_mutex_lock(&sm64_demo_lock);
+    const char* path = sm64_demo_path();
+    if (sm64_demo_best < 0) {
+        int count, frames;
+        SM64Input* on_file = sm64_demo_read(path, &count, &frames);
+        sm64_demo_best = on_file != NULL ? frames : INT_MAX;
+        free(on_file);
+    }
+    if (env->trail_frames < sm64_demo_best) {
+        char temporary[1024];
+        snprintf(temporary, sizeof(temporary), "%s.%d", path, (int)env->rng);
+        FILE* file = fopen(temporary, "wb");
+        SM64DemoHeader header = {.count = env->trail_count, .frames = env->trail_frames};
+        memcpy(header.magic, SM64_DEMO_MAGIC, sizeof(header.magic));
+        if (file != NULL && fwrite(&header, sizeof(header), 1, file) == 1 &&
+            fwrite(env->trail, sizeof(SM64Input), (size_t)env->trail_count, file) == (size_t)env->trail_count &&
+            fclose(file) == 0 && rename(temporary, path) == 0) {
+            sm64_demo_best = env->trail_frames;
+        } else {
+            fprintf(stderr, "sm64: could not keep a door of %d frames in %s\n", env->trail_frames, path);
+        }
+    }
+    pthread_mutex_unlock(&sm64_demo_lock);
+}
+
+/* Read the demo to robustify, once for the process. */
+static void sm64_demo_load(SM64* env) {
+    pthread_mutex_lock(&sm64_demo_lock);
+    if (sm64_demo == NULL) {
+        sm64_demo = sm64_demo_read(sm64_demo_path(), &sm64_demo_count, &sm64_demo_frames);
+        if (sm64_demo == NULL) {
+            fprintf(stderr, "sm64: backward needs a door to work back from, and there is none in %s.\n"
+                            "      Explore first: ./build/sm64_tool explore\n", sm64_demo_path());
+            exit(1);
+        }
+        int first = env->backward_step > 0 ? env->backward_step : 1;
+        sm64_frontier = first < sm64_demo_frames ? first : sm64_demo_frames;
+    }
+    pthread_mutex_unlock(&sm64_demo_lock);
+}
+
+/* Start on the demo: replay it to somewhere between the frontier and
+ * backward_step frames nearer the door, or, half the time, to anywhere between
+ * the frontier and the door. */
+static void sm64_demo_start(SM64* env) {
+    pthread_mutex_lock(&sm64_demo_lock);
+    int frontier = sm64_frontier;
+    pthread_mutex_unlock(&sm64_demo_lock);
+    int nearest = frontier - env->backward_step;
+    if (nearest < 1) {
+        nearest = 1;
+    }
+    env->start_frontier = frontier;
+    if (rand_r(&env->seed) % 2 == 0) {
+        nearest = 1;
+        env->start_frontier = -1; /* rehearsal: does not count toward moving the frontier */
+    }
+    int before = nearest + (int)(rand_r(&env->seed) % (unsigned)(frontier - nearest + 1));
+    env->trail_count = 0;
+    env->trail_frames = 0;
+    for (int k = 0; k < sm64_demo_count; k++) {
+        if (env->trail_frames + sm64_demo[k].frames > sm64_demo_frames - before) {
+            break;
+        }
+        sm64_trail_push(env, sm64_demo[k].buttons, sm64_demo[k].frames, sm64_demo[k].stick_x,
+                        sm64_demo[k].stick_y);
+    }
+    sm64_replay_trail(env);
+
+    /* The clock starts partway, so an episode has as long to reach the door as
+     * the demo took from here plus DEMO_SLACK, never more than the whole clock,
+     * and one that will not make it is over in about that long.
+     *
+     * The second run started every one with the whole clock, 900 frames to get
+     * from a few seconds out. Most episodes ran all of it and paid -1, entropy
+     * fell to 0.01 by 260K steps, and the frontier never got past 120. The runs
+     * after that set the clock to what the demo's read at that point, and the
+     * two that trained stably stuck at 570: that far back, the explorer's
+     * wandering at the start of the demo had already spent a hundred frames,
+     * so an episode there had less time than one from the real start. */
+    int budget = sm64_demo_frames - env->trail_frames + DEMO_SLACK;
+    env->start_tick = budget < env->max_ticks ? env->max_ticks - budget : 0;
+}
+
+/* An episode that began on the demo is over: count it toward moving the frontier
+ * back, if the frontier is still where it began. */
+static void sm64_demo_result(SM64* env, int door) {
+    pthread_mutex_lock(&sm64_demo_lock);
+    if (env->start_frontier == sm64_frontier && sm64_frontier < sm64_demo_frames) {
+        sm64_frontier_tries++;
+        sm64_frontier_doors += door;
+        if (sm64_frontier_tries >= BACKWARD_WINDOW) {
+            if ((float)sm64_frontier_doors >= env->backward_rate * (float)sm64_frontier_tries) {
+                sm64_frontier += env->backward_step > 0 ? env->backward_step : 1;
+                if (sm64_frontier > sm64_demo_frames) {
+                    sm64_frontier = sm64_demo_frames;
+                }
+            }
+            sm64_frontier_tries = 0;
+            sm64_frontier_doors = 0;
+        }
+    }
+    pthread_mutex_unlock(&sm64_demo_lock);
+}
+
 void init(SM64* env) {
     N64GymOptions options = {
         .host = sm64_setting("SM64_HOST", SM64_HOST),
@@ -337,7 +845,12 @@ void init(SM64* env) {
         exit(1);
     }
     env->opened = 1;
+    env->entered = (uint32_t*)calloc(NOVELTY_CUBES, sizeof(uint32_t));
+    env->seed = 0x9E3779B9u ^ (env->rng * 2654435761u);
     env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
+    if (env->backward > 0.0f) {
+        sm64_demo_load(env);
+    }
 
     const char* state = sm64_setting("SM64_STATE", SM64_STATE);
     struct stat ignored;
@@ -367,8 +880,6 @@ static void sm64_write_observations(SM64* env, float speed) {
     obs[OBS_POS_X] = sm64_pos(env, 0) / 4000.0f;
     obs[OBS_POS_Y] = sm64_pos(env, 1) / 2000.0f;
     obs[OBS_POS_Z] = sm64_pos(env, 2) / 4000.0f;
-    obs[OBS_AWAY_X] = (sm64_pos(env, 0) - env->start_x) / 4000.0f;
-    obs[OBS_AWAY_Z] = (sm64_pos(env, 2) - env->start_z) / 4000.0f;
     obs[OBS_VEL_X] = sm64_vel(env, 0) / 60.0f;
     obs[OBS_VEL_Y] = sm64_vel(env, 1) / 60.0f;
     obs[OBS_VEL_Z] = sm64_vel(env, 2) / 60.0f;
@@ -423,49 +934,83 @@ void c_reset(SM64* env) {
     env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
     env->camera_offset = 0;
     env->had_stick = 0;
+    env->trail_count = 0;
+    env->trail_frames = 0;
+    env->from_start = 1;
+    env->replayed_frames = 0;
 
-    /* A few frames of some direction, so that not every episode is the same
-     * episode. Without it there is one starting state and the policy can learn
-     * one trajectory through it. */
-    if (env->random_start > 0) {
-        int frames = (int)(rand() % (unsigned)(env->random_start + 1));
+    env->start_cube = -1;
+    env->start_frontier = -1;
+    env->start_tick = 0;
+    if (env->backward > 0.0f && (double)rand_r(&env->seed) / ((double)RAND_MAX + 1.0) < env->backward) {
+        sm64_demo_start(env);
+        env->from_start = 0;
+        env->replayed_frames = env->trail_frames;
+    } else if (env->go_explore > 0.0f && (double)rand_r(&env->seed) / ((double)RAND_MAX + 1.0) < env->go_explore &&
+        (env->start_cube = sm64_archive_start(env)) >= 0) {
+        env->from_start = 0;
+        env->replayed_frames = env->trail_frames;
+    } else if (env->random_start > 0) {
+        /* A few frames of some direction, so that not every episode is the same
+         * episode. Without it there is one starting state and the policy can
+         * learn one trajectory through it. */
+        int frames = (int)(rand_r(&env->seed) % (unsigned)(env->random_start + 1));
         if (frames > 0) {
             float x, y;
-            sm64_aim(env, 1 + (int)(rand() % STICK_DIRECTIONS), &x, &y);
+            sm64_aim(env, 1 + (int)(rand_r(&env->seed) % STICK_DIRECTIONS), &x, &y);
             n64gym_pad(&env->gym, 0, x, y);
             n64gym_step(&env->gym, frames);
+            sm64_trail_push(env, 0, frames, x, y);
             sm64_watch_camera(env);
         }
     }
 
-    env->tick = 0;
+    env->tick = env->start_tick;
     env->steps = 0;
     env->episode_return = 0.0f;
     env->distance = 0.0f;
     env->top_speed = 0.0f;
     env->forward_vel_sum = 0.0f;
     env->airborne_frames = 0;
+    env->dialog_frames = 0;
     env->last_x = sm64_pos(env, 0);
     env->last_z = sm64_pos(env, 2);
-    env->start_x = env->last_x;
-    env->start_z = env->last_z;
-    env->covered = 0.0f;
+    env->closest = sm64_door_distance(env->last_x, env->last_z);
+    env->episode++;
+    env->novelty_earned = 0.0f;
+    env->cells_entered = 0;
     sm64_write_observations(env, 0.0f);
 }
 
-static void sm64_end_episode(SM64* env, int early) {
-    float frames = (float)(env->tick > 0 ? env->tick : 1);
-    float speed = env->distance / frames;
-    env->log.perf += speed / 48.0f; /* a long jump, which is about as fast as he goes */
-    env->log.score += speed;
+enum { ENDED_CLOCK, ENDED_DOOR, ENDED_EARLY };
+
+static void sm64_end_episode(SM64* env, int how) {
+    float frames = (float)(env->tick > env->start_tick ? env->tick - env->start_tick : 1);
+    int door = how == ENDED_DOOR;
+    env->log.perf += (float)door;
+    env->log.score += door ? 1.0f - (float)env->tick / (float)env->max_ticks : 0.0f;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += (float)env->steps;
-    env->log.covered += env->covered;
+    env->log.frames += door ? (float)env->tick : (float)env->max_ticks;
+    env->log.closest += door ? 0.0f : env->closest;
+    env->log.novelty += env->novelty_earned;
+    env->log.cells += (float)env->cells_entered;
+    env->log.explored += (float)sm64_cubes_explored;
+    env->log.from_start += (float)env->from_start;
+    env->log.start_perf += (float)(door && env->from_start);
+    env->log.archive += (float)sm64_archive_size;
+    env->log.replayed += (float)env->replayed_frames;
+    env->log.door_cubes += (float)sm64_door_cube_count;
+    env->log.frontier += (float)sm64_frontier;
+    if (env->start_frontier >= 0) {
+        sm64_demo_result(env, door);
+    }
     env->log.distance += env->distance;
     env->log.top_speed += env->top_speed;
     env->log.forward_vel += env->forward_vel_sum / frames;
     env->log.airborne += (float)env->airborne_frames / frames;
-    env->log.ended_early += (float)early;
+    env->log.dialog += (float)env->dialog_frames / frames;
+    env->log.ended_early += (float)(how == ENDED_EARLY);
     env->log.n += 1.0f;
     env->terminals[0] = 1.0f;
     c_reset(env);
@@ -489,6 +1034,7 @@ void c_step(SM64* env) {
     float stick_x, stick_y;
     sm64_aim(env, direction, &stick_x, &stick_y);
     n64gym_pad(&env->gym, buttons, stick_x, stick_y);
+    sm64_trail_push(env, buttons, env->frameskip, stick_x, stick_y);
     if (!n64gym_step(&env->gym, env->frameskip)) {
         fprintf(stderr, "sm64: the game stopped: %s\n", env->gym.error);
         exit(1);
@@ -497,39 +1043,58 @@ void c_step(SM64* env) {
     sm64_watch_camera(env);
 
     uint32_t action = sm64_action(env);
+    int level = sm64_level(env);
+    float step_cost = env->time_penalty * (float)env->frameskip / (float)env->max_ticks;
+
+    /* The door, the frame it starts to open. The warp inside comes about forty
+     * frames later and is the same forty frames for every run, so they are not
+     * counted. The level check is only a backstop: a step is two frames, so
+     * the door's action is always seen before the warp. */
+    if (action == ACT_PUSHING_DOOR || action == ACT_PULLING_DOOR || level == LEVEL_CASTLE) {
+        env->rewards[0] = DOOR_REWARD - step_cost;
+        env->episode_return += env->rewards[0];
+        if (env->go_explore > 0.0f) {
+            sm64_demo_offer(env);
+            sm64_credit_door(env, sm64_cube(env, sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2)));
+        }
+        sm64_end_episode(env, ENDED_DOOR);
+        return;
+    }
+    /* A death, or any other way out of the castle grounds, is not the door,
+     * and it must not be a way to stop the clock either: it pays for the rest
+     * of the clock at once, the same as running it out. */
+    if (level != LEVEL_CASTLE_GROUNDS || n64_s16(&env->gym, env->mario + M_HEALTH) < 0x100) {
+        int left = env->max_ticks - env->tick;
+        env->rewards[0] = -step_cost - env->time_penalty * (float)(left > 0 ? left : 0) / (float)env->max_ticks;
+        env->episode_return += env->rewards[0];
+        sm64_end_episode(env, ENDED_EARLY);
+        return;
+    }
+
     float x = sm64_pos(env, 0);
     float z = sm64_pos(env, 2);
     float moved = sqrtf((x - env->last_x) * (x - env->last_x) + (z - env->last_z) * (z - env->last_z));
     env->last_x = x;
     env->last_z = z;
-
-    /* A level change is a warp, and a warp is not running. Ending on it also
-     * keeps its few thousand units of teleport out of the reward. */
-    int warped = sm64_level(env) != LEVEL_CASTLE_GROUNDS ||
-                 (action & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE;
-    if (warped) {
-        sm64_end_episode(env, 1);
-        return;
-    }
-
     float speed = moved / (float)env->frameskip;
     env->distance += moved;
     env->forward_vel_sum += fabsf(sm64_forward_vel(env)) * (float)env->frameskip;
     if (action & ACT_FLAG_AIR) {
         env->airborne_frames += env->frameskip;
     }
+    if ((action & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE) {
+        env->dialog_frames += env->frameskip;
+    }
     if (speed > env->top_speed) {
         env->top_speed = speed;
     }
-    /* Paid as the distance from the start changes, so running back toward it
-     * costs what running away earned and a circle earns nothing. */
-    float covered = sqrtf((x - env->start_x) * (x - env->start_x) + (z - env->start_z) * (z - env->start_z));
-    env->rewards[0] = (covered - env->covered) / env->speed_scale;
-    env->covered = covered;
+
+    env->rewards[0] = -step_cost + sm64_novelty(env, x, sm64_pos(env, 1), z);
     env->episode_return += env->rewards[0];
+    env->closest = fminf(env->closest, sm64_door_distance(x, z));
 
     if (env->tick >= env->max_ticks) {
-        sm64_end_episode(env, 0);
+        sm64_end_episode(env, ENDED_CLOCK);
         return;
     }
     sm64_write_observations(env, speed);
@@ -563,6 +1128,10 @@ void c_close(SM64* env) {
         n64gym_close(&env->gym);
         env->opened = 0;
     }
+    free(env->entered);
+    free(env->trail);
+    env->trail = NULL;
+    env->entered = NULL;
 }
 
 #endif

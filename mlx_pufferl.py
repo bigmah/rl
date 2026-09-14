@@ -149,11 +149,18 @@ def zeropower_via_newtonschulz5(G, eps=1e-7):
     return x.T if transpose else x
 
 class Muon(optim.Optimizer):
-    '''pufferlib.muon.Muon: Nesterov momentum, orthogonalized updates for matrices'''
-    def __init__(self, learning_rate, momentum=0.9):
+    '''pufferlib.muon.Muon: Nesterov momentum, orthogonalized updates for matrices.
+
+    An orthogonalized update is the same size however small the gradient was, so a
+    reward that says nothing for millions of steps walks the weights in random
+    directions until they blow up: the sm64 door-or-nothing run did at 3.4M steps,
+    value loss 0 -> 567,829 and entropy to zero. Weight decay holds them to a size.
+    PufferLib passes 0, so that is the default.'''
+    def __init__(self, learning_rate, momentum=0.9, weight_decay=0.0):
         super().__init__()
         self._maybe_schedule('learning_rate', learning_rate)
         self.momentum = momentum
+        self.weight_decay = weight_decay
 
     def init_single(self, parameter, state):
         state['momentum_buffer'] = mx.zeros_like(parameter)
@@ -165,7 +172,8 @@ class Muon(optim.Optimizer):
         if update.ndim >= 2:
             update = zeropower_via_newtonschulz5(update.reshape(update.shape[0], -1))
             update = update * max(1, update.shape[0] / update.shape[1]) ** 0.5
-        return parameter - self.learning_rate.astype(gradient.dtype) * update.reshape(parameter.shape)
+        lr = self.learning_rate.astype(gradient.dtype)
+        return parameter * (1 - lr * self.weight_decay) - lr * update.reshape(parameter.shape)
 
 def _buffer_view(ptr, shape, dtype):
     '''Zero-copy numpy view of a buffer owned by the C vecenv'''
@@ -207,7 +215,11 @@ class PuffeRL:
         self.total_epochs = max(1, config['total_timesteps'] // self.batch_size)
         self.rng = np.random.default_rng(config['seed'])
 
-        self.optimizer = Muon(learning_rate=config['learning_rate'], momentum=config['beta1'])
+        self.optimizer = Muon(learning_rate=config['learning_rate'], momentum=config['beta1'],
+            weight_decay=config.get('weight_decay', 0.0))
+        # With target_entropy set, ent_coef is only where the coefficient starts: see train()
+        self.ent_coef = config['ent_coef']
+        self.log_ent_coef = math.log(config['ent_coef'])
         self.optimizer.init(policy.trainable_parameters())
         self._act = self._compile_act()
         self._train_step = self._compile_train_step()
@@ -343,7 +355,10 @@ class PuffeRL:
         if config['anneal_lr']:
             self.optimizer.learning_rate = cosine_annealing(config['learning_rate'], config['min_lr_ratio'], progress)
         ent_coef = config['ent_coef']
-        if config['anneal_ent_coef']:
+        target_entropy = config.get('target_entropy', 0)
+        if target_entropy:
+            ent_coef = self.ent_coef
+        elif config['anneal_ent_coef']:
             ent_coef = cosine_annealing(ent_coef, config['min_ent_coef_ratio'], progress)
 
         # Advantages and prioritized sampling run on CPU. Values and ratios are
@@ -382,6 +397,15 @@ class PuffeRL:
         var_y = y_true.var()
         self.losses = dict(zip(LOSS_KEYS, (losses / num_minibatches).tolist()))
         self.losses['explained_variance'] = float('nan') if var_y == 0 else float(1 - (y_true - y_pred).var() / var_y)
+        self.losses['ent_coef'] = float(ent_coef)
+        if target_entropy:
+            # Steer the coefficient toward the entropy asked for: up while the policy is
+            # more certain than that, down while it is less, by a factor of e every
+            # 1 / (ent_coef_rate * gap) epochs, kept between 1e-4 and 0.5.
+            gap = target_entropy - self.losses['entropy']
+            self.log_ent_coef = min(max(self.log_ent_coef + config.get('ent_coef_rate', 0.01) * gap,
+                math.log(1e-4)), math.log(0.5))
+            self.ent_coef = math.exp(self.log_ent_coef)
         self.epoch += 1
 
         elapsed = time.perf_counter() - start
