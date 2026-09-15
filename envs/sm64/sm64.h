@@ -88,6 +88,12 @@
  * outside the castle, so no episode spends its first thousand frames watching
  * Peach's letter. See sm64_make_state.
  *
+ * SM64_GOAL=star swaps the door for a star in Bob-omb Battlefield: episodes
+ * start where the painting drops Mario into the course, the star pays what the
+ * door did and ends the episode the frame he touches it, and leaving the
+ * course is the death. Everything else -- the clock, novelty, the archive, the
+ * demo -- is the same code. See the star.
+ *
  * Actions: four discrete heads
  *   stick: 0 none, 1-16 a direction relative to the way Mario is facing
  *          (1 straight ahead, 5 right, 9 back, 13 left)
@@ -156,6 +162,30 @@
 /* As much as rewards are clipped to in a step: more would buy nothing. */
 #define DOOR_REWARD 1.0f
 
+/* --- the star ------------------------------------------------------------------
+ *
+ * Getting there. The castle grounds keep a warp node for each half of the
+ * front door, {id, level, area, node} in one word: node 0 and 1 lead to the
+ * castle's inside. Pointed at Bob-omb Battlefield's node 0x0A instead, which
+ * is where its painting puts Mario, the door takes him to the course the way a
+ * painting does, act select and all.
+ *
+ * What counts. Any star: touching one raises M_NUM_STARS that frame. Nothing
+ * says which star, where it is, or what makes it appear. STAR_X and STAR_Z are
+ * where the one star out in the open in act 1 floats, behind the Chain Chomp's
+ * gate, and are only for the log's `closest`, as the door's are.
+ */
+#define LEVEL_BOB 9
+#define CURR_COURSE_NUM 0x8033BAC6 /* s16; Bob-omb Battlefield is course 1 */
+#define CURR_ACT_NUM 0x8033BAC8    /* s16 */
+#define DOOR_WARP_NODE_LEFT 0x80196414
+#define DOOR_WARP_NODE_RIGHT 0x80196420
+#define DOOR_WARP_TO_CASTLE_LEFT 0x00060100 /* node 0 -> level 6, area 1, node 0 */
+#define DOOR_WARP_TO_CASTLE_RIGHT 0x01060101
+#define BOB_PAINTING_NODE 0x0A
+#define STAR_X 1550.0f
+#define STAR_Z 300.0f
+
 /* struct MarioState */
 #define M_INPUT 0x02   /* u16 */
 #define M_ACTION 0x0C  /* u32 */
@@ -172,6 +202,7 @@
 #define M_CEIL_HEIGHT 0x6C
 #define M_FLOOR_HEIGHT 0x70
 #define M_WATER_LEVEL 0x76 /* s16 */
+#define M_NUM_STARS 0xAA   /* s16, goes up the frame he touches a star */
 #define M_HEALTH 0xAE      /* s16, 0x880 is full and under 0x100 is dead */
 #define SURFACE_NORMAL_Y 0x20 /* f32 inside struct Surface */
 
@@ -279,6 +310,8 @@ typedef struct {
 
     N64Gym gym;
     int opened;
+    int star;             /* the goal is a star in Bob-omb Battlefield, not the door (SM64_GOAL=star) */
+    int stars_at_start;   /* the savestate's star count, which a star raises */
     uint32_t mario;       /* where MarioState is, read once from its pointer */
     float last_x, last_z;
     float closest;        /* the nearest he has come to the door, for the log */
@@ -333,6 +366,24 @@ static inline float sm64_door_distance(float x, float z) {
     return sqrtf((DOOR_X - x) * (DOOR_X - x) + (DOOR_Z - z) * (DOOR_Z - z));
 }
 
+/* The same for whichever goal this is. */
+static inline float sm64_goal_distance(const SM64* env, float x, float z) {
+    return env->star ? sqrtf((STAR_X - x) * (STAR_X - x) + (STAR_Z - z) * (STAR_Z - z)) : sm64_door_distance(x, z);
+}
+
+static inline int sm64_home_level(const SM64* env) { return env->star ? LEVEL_BOB : LEVEL_CASTLE_GROUNDS; }
+
+/* The door, the frame it starts to open, or a star, the frame he touches it. The
+ * level check is only a backstop for the door: a step is two frames, so its
+ * action is always seen before the warp inside. */
+static int sm64_goal_reached(SM64* env) {
+    if (env->star) {
+        return n64_s16(&env->gym, env->mario + M_NUM_STARS) > env->stars_at_start;
+    }
+    uint32_t action = sm64_action(env);
+    return action == ACT_PUSHING_DOOR || action == ACT_PULLING_DOOR || sm64_level(env) == LEVEL_CASTLE;
+}
+
 /* --- novelty ------------------------------------------------------------------
  *
  * Cubes over the whole of a level's space: x and z from -8192 to 8192, y from
@@ -368,7 +419,8 @@ static inline int sm64_cube(const SM64* env, float x, float y, float z) {
  * For every cube, the shortest run of pad inputs from the savestate that has
  * reached it. One archive for the process, like the visit counts, behind a
  * lock: the games reset and step in parallel. A run longer than
- * ARCHIVE_MAX_FRAMES is not kept, so no reset replays more than that.
+ * ARCHIVE_EPISODES episodes' worth of frames is not kept, so no reset replays
+ * more than that: 2700 frames with the door's 900-frame episodes.
  */
 typedef struct SM64Input {
     uint16_t buttons;
@@ -382,7 +434,7 @@ typedef struct {
     int frames;
 } SM64Cell;
 
-#define ARCHIVE_MAX_FRAMES 2700
+#define ARCHIVE_EPISODES 3
 
 static SM64Cell sm64_archive[NOVELTY_CUBES];
 static int sm64_archive_cubes[NOVELTY_CUBES]; /* the cubes that have a run, in the order they got one */
@@ -429,7 +481,7 @@ static void sm64_replay_trail(SM64* env) {
 
 /* This episode has just reached a cube: keep how, if it is the first way or a shorter one. */
 static void sm64_archive_offer(SM64* env, int cube) {
-    if (env->trail_frames > ARCHIVE_MAX_FRAMES) {
+    if (env->trail_frames > ARCHIVE_EPISODES * env->max_ticks) {
         return;
     }
     pthread_mutex_lock(&sm64_archive_lock);
@@ -601,10 +653,16 @@ static void sm64_watch_camera(SM64* env) {
  *
  * Start is deliberately not mashed after the menus: in the game it opens the
  * pause screen, and a game paused is a game that never gets anywhere.
+ *
+ * For the star, the castle's front door is then pointed at Bob-omb Battlefield
+ * (see DOOR_WARP_NODE_LEFT) and Mario is put in front of it with the stick
+ * pushed forward. He opens it, the game fades to the act select, A picks act
+ * 1 -- the only act a new save has -- and he lands at the start of the course.
  */
-static int sm64_make_state(N64Gym* gym, const char* path, char* error, size_t error_size) {
+static int sm64_make_state(N64Gym* gym, const char* path, int star, char* error, size_t error_size) {
     uint16_t buttons;
-    for (int i = 0; i < 4000; i++) {
+    int in_grounds = 0;
+    for (int i = 0; i < 4000 && !in_grounds; i++) {
         /* Start twice, a few seconds apart, then A over and over. */
         if (i == 200 || i == 260) {
             buttons = BUTTON_START;
@@ -620,23 +678,92 @@ static int sm64_make_state(N64Gym* gym, const char* path, char* error, size_t er
             return 0;
         }
         uint32_t mario = n64_u32(gym, MARIO_STATE_PTR);
-        if (i > 400 && n64_is_ram(mario) && n64_s16(gym, CURR_LEVEL_NUM) == LEVEL_CASTLE_GROUNDS &&
-            n64_u32(gym, mario + M_ACTION) == ACT_IDLE) {
-            /* Let him settle, with nothing held. */
-            n64gym_pad(gym, 0, 0.0f, 0.0f);
-            if (!n64gym_step(gym, 30)) {
-                snprintf(error, error_size, "%s", gym->error);
-                return 0;
-            }
-            if (!n64gym_save_state(gym, path)) {
-                snprintf(error, error_size, "%s", gym->error);
-                return 0;
-            }
+        in_grounds = i > 400 && n64_is_ram(mario) && n64_s16(gym, CURR_LEVEL_NUM) == LEVEL_CASTLE_GROUNDS &&
+                     n64_u32(gym, mario + M_ACTION) == ACT_IDLE;
+    }
+    if (!in_grounds) {
+        snprintf(error, error_size,
+                 "the game never reached the castle grounds; it may be waiting on something");
+        return 0;
+    }
+    /* Let him settle, with nothing held. */
+    n64gym_pad(gym, 0, 0.0f, 0.0f);
+    if (!n64gym_step(gym, 30)) {
+        snprintf(error, error_size, "%s", gym->error);
+        return 0;
+    }
+    if (!star) {
+        if (!n64gym_save_state(gym, path)) {
+            snprintf(error, error_size, "%s", gym->error);
+            return 0;
+        }
+        return 1;
+    }
+
+    if (n64_u32(gym, DOOR_WARP_NODE_LEFT) != DOOR_WARP_TO_CASTLE_LEFT ||
+        n64_u32(gym, DOOR_WARP_NODE_RIGHT) != DOOR_WARP_TO_CASTLE_RIGHT) {
+        snprintf(error, error_size, "the castle door's warp nodes are not at %08x and %08x",
+                 DOOR_WARP_NODE_LEFT, DOOR_WARP_NODE_RIGHT);
+        return 0;
+    }
+    n64_set_u32(gym, DOOR_WARP_NODE_LEFT, 0x00000100 | (LEVEL_BOB << 16) | BOB_PAINTING_NODE);
+    n64_set_u32(gym, DOOR_WARP_NODE_RIGHT, 0x01000100 | (LEVEL_BOB << 16) | BOB_PAINTING_NODE);
+    uint32_t mario = n64_u32(gym, MARIO_STATE_PTR);
+    n64_set_f32(gym, mario + M_POS, -76.0f); /* in front of the left half, facing it */
+    n64_set_f32(gym, mario + M_POS + 4, 803.0f);
+    n64_set_f32(gym, mario + M_POS + 8, -2900.0f);
+
+    int spawned = 0, landed = 0;
+    for (int i = 0; i < 1500 && !landed; i++) {
+        int level = n64_s16(gym, CURR_LEVEL_NUM);
+        /* Up on the stick until the door has him, then A for the act select --
+         * but not once he has appeared in the course, where A is a jump. */
+        n64gym_pad(gym, (level == LEVEL_BOB && !spawned && (i % 16) < 2) ? BUTTON_A : 0, 0.0f,
+                   level == LEVEL_CASTLE_GROUNDS ? 1.0f : 0.0f);
+        if (!n64gym_step(gym, 1)) {
+            snprintf(error, error_size, "the game stopped on the way to Bob-omb Battlefield: %s", gym->error);
+            return 0;
+        }
+        mario = n64_u32(gym, MARIO_STATE_PTR);
+        uint32_t action = n64_is_ram(mario) ? n64_u32(gym, mario + M_ACTION) : 0;
+        spawned = spawned || (n64_s16(gym, CURR_LEVEL_NUM) == LEVEL_BOB && (action & ACT_FLAG_AIR));
+        landed = spawned && action == ACT_IDLE;
+    }
+    if (!landed || n64_s16(gym, CURR_COURSE_NUM) != 1 || n64_s16(gym, CURR_ACT_NUM) != 1) {
+        snprintf(error, error_size, "the door never left Mario standing in Bob-omb Battlefield act 1 (course %d act %d)",
+                 n64_s16(gym, CURR_COURSE_NUM), n64_s16(gym, CURR_ACT_NUM));
+        return 0;
+    }
+    /* He lands with the course's opening camera still holding the level: Mario
+     * does not move, whatever is held, until a button is pressed after about
+     * two seconds of it, and that press is spent on the camera. A state saved
+     * before then loads into a game where he never moves at all. So B is
+     * pressed every half second, and a state is kept only once, put back and
+     * dropped from the air, Mario falls. */
+    for (int tries = 0; tries < 30; tries++) {
+        n64gym_pad(gym, BUTTON_B, 0.0f, 0.0f);
+        n64gym_step(gym, 2);
+        n64gym_pad(gym, 0, 0.0f, 0.0f);
+        for (int wait = 0; wait < 90 && (wait < 14 || n64_u32(gym, mario + M_ACTION) != ACT_IDLE); wait++) {
+            n64gym_step(gym, 1);
+        }
+        if (!n64gym_save_state(gym, path) || !n64gym_load_state(gym, path)) {
+            snprintf(error, error_size, "%s", gym->error);
+            return 0;
+        }
+        float y = n64_f32(gym, mario + M_POS + 4);
+        n64_set_f32(gym, mario + M_POS + 4, y + 300.0f);
+        n64gym_step(gym, 1);
+        int falls = (n64_u32(gym, mario + M_ACTION) & ACT_FLAG_AIR) != 0;
+        if (!n64gym_load_state(gym, path)) {
+            snprintf(error, error_size, "%s", gym->error);
+            return 0;
+        }
+        if (falls) {
             return 1;
         }
     }
-    snprintf(error, error_size,
-             "the game never reached the castle grounds; it may be waiting on something");
+    snprintf(error, error_size, "Mario landed in Bob-omb Battlefield but never came back to life in a saved state");
     return 0;
 }
 
@@ -645,6 +772,13 @@ static int sm64_make_state(N64Gym* gym, const char* path, char* error, size_t er
 static const char* sm64_setting(const char* name, const char* fallback) {
     const char* found = getenv(name);
     return (found != NULL && found[0] != '\0') ? found : fallback;
+}
+
+/* One goal for the process, like the archive: the door, or SM64_GOAL=star. */
+static int sm64_star_goal(void) { return strcmp(sm64_setting("SM64_GOAL", "door"), "star") == 0; }
+
+static const char* sm64_state_path(void) {
+    return sm64_star_goal() ? sm64_setting("SM64_STAR_STATE", SM64_STAR_STATE) : sm64_setting("SM64_STATE", SM64_STATE);
 }
 
 /* --- the fastest door (Go-Explore's second phase) ----------------------------
@@ -693,7 +827,9 @@ static int sm64_frontier;         /* frames before the door */
 static int sm64_frontier_tries, sm64_frontier_doors;
 static pthread_mutex_t sm64_demo_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static const char* sm64_demo_path(void) { return sm64_setting("SM64_DEMO", SM64_DEMO); }
+static const char* sm64_demo_path(void) {
+    return sm64_star_goal() ? sm64_setting("SM64_STAR_DEMO", SM64_STAR_DEMO) : sm64_setting("SM64_DEMO", SM64_DEMO);
+}
 
 /* A demo's inputs, or NULL if the file has none. */
 static SM64Input* sm64_demo_read(const char* path, int* count, int* frames) {
@@ -719,8 +855,23 @@ static SM64Input* sm64_demo_read(const char* path, int* count, int* frames) {
     return inputs;
 }
 
-/* This episode has opened the door: if no run on file was faster, it is the demo
- * now. Written beside the file and renamed over it, so a reader never sees half. */
+/* Write a run of inputs as a demo. Written beside the file and renamed over it,
+ * so a reader never sees half. `writer` keeps two games' files apart. */
+static int sm64_demo_write(const char* path, int writer, const SM64Input* inputs, int count, int frames) {
+    char temporary[1024];
+    snprintf(temporary, sizeof(temporary), "%s.%d", path, writer);
+    FILE* file = fopen(temporary, "wb");
+    if (file == NULL) {
+        return 0;
+    }
+    SM64DemoHeader header = {.count = count, .frames = frames};
+    memcpy(header.magic, SM64_DEMO_MAGIC, sizeof(header.magic));
+    int written = fwrite(&header, sizeof(header), 1, file) == 1 &&
+                  fwrite(inputs, sizeof(SM64Input), (size_t)count, file) == (size_t)count;
+    return fclose(file) == 0 && written && rename(temporary, path) == 0;
+}
+
+/* This episode has opened the door: if no run on file was faster, it is the demo now. */
 static void sm64_demo_offer(SM64* env) {
     pthread_mutex_lock(&sm64_demo_lock);
     const char* path = sm64_demo_path();
@@ -731,14 +882,7 @@ static void sm64_demo_offer(SM64* env) {
         free(on_file);
     }
     if (env->trail_frames < sm64_demo_best) {
-        char temporary[1024];
-        snprintf(temporary, sizeof(temporary), "%s.%d", path, (int)env->rng);
-        FILE* file = fopen(temporary, "wb");
-        SM64DemoHeader header = {.count = env->trail_count, .frames = env->trail_frames};
-        memcpy(header.magic, SM64_DEMO_MAGIC, sizeof(header.magic));
-        if (file != NULL && fwrite(&header, sizeof(header), 1, file) == 1 &&
-            fwrite(env->trail, sizeof(SM64Input), (size_t)env->trail_count, file) == (size_t)env->trail_count &&
-            fclose(file) == 0 && rename(temporary, path) == 0) {
+        if (sm64_demo_write(path, (int)env->rng, env->trail, env->trail_count, env->trail_frames)) {
             sm64_demo_best = env->trail_frames;
         } else {
             fprintf(stderr, "sm64: could not keep a door of %d frames in %s\n", env->trail_frames, path);
@@ -845,6 +989,7 @@ void init(SM64* env) {
         exit(1);
     }
     env->opened = 1;
+    env->star = sm64_star_goal();
     env->entered = (uint32_t*)calloc(NOVELTY_CUBES, sizeof(uint32_t));
     env->seed = 0x9E3779B9u ^ (env->rng * 2654435761u);
     env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
@@ -852,14 +997,14 @@ void init(SM64* env) {
         sm64_demo_load(env);
     }
 
-    const char* state = sm64_setting("SM64_STATE", SM64_STATE);
+    const char* state = sm64_state_path();
     struct stat ignored;
     if (stat(state, &ignored) != 0) {
         /* Nobody has played through the intro yet. Do it once, here, and every
          * episode of every run from now on starts from it. */
         char error[256];
         fprintf(stderr, "sm64: playing through the intro once to make %s\n", state);
-        if (!sm64_make_state(&env->gym, state, error, sizeof(error))) {
+        if (!sm64_make_state(&env->gym, state, env->star, error, sizeof(error))) {
             fprintf(stderr, "sm64: %s\n", error);
             exit(1);
         }
@@ -869,6 +1014,11 @@ void init(SM64* env) {
         exit(1);
     }
     env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
+    env->stars_at_start = n64_s16(&env->gym, env->mario + M_NUM_STARS);
+    if (sm64_level(env) != sm64_home_level(env)) {
+        fprintf(stderr, "sm64: %s does not start where this goal does; delete it to make it again\n", state);
+        exit(1);
+    }
 }
 
 static void sm64_write_observations(SM64* env, float speed) {
@@ -927,7 +1077,7 @@ static void sm64_write_observations(SM64* env, float speed) {
 
 /* Required function */
 void c_reset(SM64* env) {
-    if (!n64gym_load_state(&env->gym, sm64_setting("SM64_STATE", SM64_STATE))) {
+    if (!n64gym_load_state(&env->gym, sm64_state_path())) {
         fprintf(stderr, "sm64: could not put the game back: %s\n", env->gym.error);
         exit(1);
     }
@@ -975,7 +1125,7 @@ void c_reset(SM64* env) {
     env->dialog_frames = 0;
     env->last_x = sm64_pos(env, 0);
     env->last_z = sm64_pos(env, 2);
-    env->closest = sm64_door_distance(env->last_x, env->last_z);
+    env->closest = sm64_goal_distance(env, env->last_x, env->last_z);
     env->episode++;
     env->novelty_earned = 0.0f;
     env->cells_entered = 0;
@@ -1043,14 +1193,12 @@ void c_step(SM64* env) {
     sm64_watch_camera(env);
 
     uint32_t action = sm64_action(env);
-    int level = sm64_level(env);
     float step_cost = env->time_penalty * (float)env->frameskip / (float)env->max_ticks;
 
-    /* The door, the frame it starts to open. The warp inside comes about forty
-     * frames later and is the same forty frames for every run, so they are not
-     * counted. The level check is only a backstop: a step is two frames, so
-     * the door's action is always seen before the warp. */
-    if (action == ACT_PUSHING_DOOR || action == ACT_PULLING_DOOR || level == LEVEL_CASTLE) {
+    /* The door, the frame it starts to open, or the star, the frame he touches
+     * it. The warp inside or the star's dance comes after, and is the same for
+     * every run, so it is not counted. */
+    if (sm64_goal_reached(env)) {
         env->rewards[0] = DOOR_REWARD - step_cost;
         env->episode_return += env->rewards[0];
         if (env->go_explore > 0.0f) {
@@ -1060,10 +1208,10 @@ void c_step(SM64* env) {
         sm64_end_episode(env, ENDED_DOOR);
         return;
     }
-    /* A death, or any other way out of the castle grounds, is not the door,
-     * and it must not be a way to stop the clock either: it pays for the rest
-     * of the clock at once, the same as running it out. */
-    if (level != LEVEL_CASTLE_GROUNDS || n64_s16(&env->gym, env->mario + M_HEALTH) < 0x100) {
+    /* A death, or any other way out of the castle grounds (or the course), is
+     * not the goal, and it must not be a way to stop the clock either: it pays
+     * for the rest of the clock at once, the same as running it out. */
+    if (sm64_level(env) != sm64_home_level(env) || n64_s16(&env->gym, env->mario + M_HEALTH) < 0x100) {
         int left = env->max_ticks - env->tick;
         env->rewards[0] = -step_cost - env->time_penalty * (float)(left > 0 ? left : 0) / (float)env->max_ticks;
         env->episode_return += env->rewards[0];
@@ -1091,7 +1239,7 @@ void c_step(SM64* env) {
 
     env->rewards[0] = -step_cost + sm64_novelty(env, x, sm64_pos(env, 1), z);
     env->episode_return += env->rewards[0];
-    env->closest = fminf(env->closest, sm64_door_distance(x, z));
+    env->closest = fminf(env->closest, sm64_goal_distance(env, x, z));
 
     if (env->tick >= env->max_ticks) {
         sm64_end_episode(env, ENDED_CLOCK);

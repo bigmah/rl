@@ -5,8 +5,8 @@
  *   sm64 watch [forward|random|door]   open a window and drive it
  *   sm64 probe [forward|random|door]   step a game headless and print what Mario is doing
  *   sm64 bench [games]   how many agent steps a second, with that many games
- *   sm64 explore [games] [seconds]   Go-Explore with no policy, keeping the fastest door
- *   sm64 replay [watch]  play that door back and check it still opens
+ *   sm64 explore [games] [seconds] [frames]   Go-Explore with no policy, keeping the fastest door
+ *   sm64 replay [watch] [file]  play that door back and check it still opens, or any run exploring kept
  */
 
 #include <omp.h>
@@ -54,7 +54,7 @@ static void show(SM64* env, int step) {
 }
 
 static int make_state(void) {
-    const char* path = sm64_setting("SM64_STATE", SM64_STATE);
+    const char* path = sm64_state_path();
     N64GymOptions options = {
         .host = sm64_setting("SM64_HOST", SM64_HOST),
         .module = sm64_setting("SM64_MODULE", SM64_MODULE),
@@ -75,7 +75,7 @@ static int make_state(void) {
            now() - started);
 
     char error[256];
-    if (!sm64_make_state(&gym, path, error, sizeof(error))) {
+    if (!sm64_make_state(&gym, path, sm64_star_goal(), error, sizeof(error))) {
         printf("%s\n", error);
         n64gym_close(&gym);
         return 1;
@@ -200,7 +200,10 @@ static int bench(int games, int steps) {
  * keep a place partway through it: an episode has to get from a cube before
  * the bridge to the next one after it, speech and all. With A held for a few
  * steps at a time and 300 frames an episode, none did in 2300 episodes, and
- * nothing came nearer the door than 1088. */
+ * nothing came nearer the door than 1088.
+ *
+ * Episodes are EXPLORE_TICKS frames unless the command says otherwise. The
+ * archive keeps runs up to three episodes long, so that scales with them. */
 #define EXPLORE_TICKS 900
 
 static void explore_policy(SM64* env) {
@@ -215,18 +218,30 @@ static void explore_policy(SM64* env) {
     }
 }
 
-static int explore(int games, double seconds) {
-    printf("starting %d games\n", games);
+/* Where exploring keeps the run that came closest: beside the demo, star.demo -> star-closest.demo. */
+static void closest_path(char* out, size_t size) {
+    const char* demo = sm64_demo_path();
+    size_t stem = strlen(demo);
+    if (stem >= 5 && strcmp(demo + stem - 5, ".demo") == 0) {
+        stem -= 5;
+    }
+    snprintf(out, size, "%.*s-closest.demo", (int)stem, demo);
+}
+
+static int explore(int games, double seconds, int ticks) {
+    printf("starting %d games, %d frames an episode\n", games, ticks);
     SM64** envs = (SM64**)calloc((size_t)games, sizeof(SM64*));
     for (int i = 0; i < games; i++) {
         envs[i] = make_env(i, 0);
         envs[i]->go_explore = 1.0f;
         envs[i]->go_explore_door = 0.5f;
-        envs[i]->max_ticks = EXPLORE_TICKS;
+        envs[i]->max_ticks = ticks;
         envs[i]->random_start = 120;
     }
     unsigned episodes = 0, doors = 0, speeches = 0;
     float closest = 1e9f;
+    SM64Input* nearest = NULL; /* the inputs, from the savestate, that came closest */
+    int nearest_count = 0, nearest_frames = 0;
     double started = now();
     #pragma omp parallel num_threads(games)
     {
@@ -237,9 +252,18 @@ static int explore(int games, double seconds) {
         while (now() < started + seconds) {
             explore_policy(env);
             c_step(env);
-            float away = sm64_door_distance(sm64_pos(env, 0), sm64_pos(env, 2));
-            if (away < closest) {
-                closest = away; /* for the progress line only, so the race is harmless */
+            /* The trail is every input since the savestate, so it is a way back to
+             * here. Checked again under the lock, since every game is racing for it. */
+            float away = sm64_goal_distance(env, sm64_pos(env, 0), sm64_pos(env, 2));
+            if (away < closest && env->trail_count > 0) {
+                #pragma omp critical(closest)
+                if (away < closest) {
+                    closest = away;
+                    nearest = (SM64Input*)realloc(nearest, (size_t)env->trail_count * sizeof(SM64Input));
+                    memcpy(nearest, env->trail, (size_t)env->trail_count * sizeof(SM64Input));
+                    nearest_count = env->trail_count;
+                    nearest_frames = env->trail_frames;
+                }
             }
             int now_talking = env->terminals[0] == 0.0f && (sm64_action(env) & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE;
             if (talking && !now_talking && env->terminals[0] == 0.0f) {
@@ -257,13 +281,22 @@ static int explore(int games, double seconds) {
                 if (sm64_demo_best > 0 && sm64_demo_best < INT_MAX) {
                     snprintf(fastest, sizeof(fastest), "%d frames", sm64_demo_best);
                 }
-                printf("%5.0fs  %5d cubes in the archive  %6u episodes  %5u cutscenes ended  %4u doors  closest %5.0f  fastest door %s\n",
-                       now() - started, sm64_archive_size, episodes, speeches, doors, closest, fastest);
+                printf("%5.0fs  %5d cubes in the archive  %6u episodes  %5u cutscenes ended  %4u %s  closest %5.0f  fastest %s\n",
+                       now() - started, sm64_archive_size, episodes, speeches, doors, env->star ? "stars" : "doors",
+                       closest, fastest);
                 fflush(stdout);
             }
         }
     }
-    printf("%u episodes, %u doors; the fastest is in %s\n", episodes, doors, sm64_demo_path());
+    printf("%u episodes, %u %s; the fastest is in %s\n", episodes, doors, envs[0]->star ? "stars" : "doors",
+           sm64_demo_path());
+    char path[1024];
+    closest_path(path, sizeof(path));
+    if (nearest_count > 0 && sm64_demo_write(path, 0, nearest, nearest_count, nearest_frames)) {
+        printf("the run that came closest, %.0f units away after %d frames, is in %s\n", closest, nearest_frames,
+               path);
+    }
+    free(nearest);
     for (int i = 0; i < games; i++) {
         c_close(envs[i]);
     }
@@ -271,16 +304,19 @@ static int explore(int games, double seconds) {
 }
 
 /* Play the demo back from the savestate, and say whether the door opens when it
- * should: the check that a demo is still good for this savestate. */
-static int replay(int window) {
+ * should: the check that a demo is still good for this savestate. Any other run
+ * of inputs plays back the same way, like the one exploring kept for coming
+ * closest, and says where it left Mario. */
+static int replay(int window, const char* path) {
     int count, frames;
-    SM64Input* inputs = sm64_demo_read(sm64_demo_path(), &count, &frames);
+    SM64Input* inputs = sm64_demo_read(path, &count, &frames);
     if (inputs == NULL) {
-        printf("no demo in %s: explore first\n", sm64_demo_path());
+        printf("no demo in %s: explore first\n", path);
         return 1;
     }
-    printf("%s: %d inputs, the door at frame %d\n", sm64_demo_path(), count, frames);
     SM64* env = make_env(0, window);
+    const char* goal = env->star ? "the star" : "the door";
+    printf("%s: %d inputs, %d frames\n", path, count, frames);
     int frame = 0;
     int opened = -1;
     int talking = 0;
@@ -293,22 +329,23 @@ static int replay(int window) {
         frame += inputs[k].frames;
         c_render(env);
         uint32_t action = sm64_action(env);
-        if (action == ACT_PUSHING_DOOR || action == ACT_PULLING_DOOR || sm64_level(env) == LEVEL_CASTLE) {
+        if (sm64_goal_reached(env)) {
             opened = frame;
         } else if (((action & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE) != talking) {
             talking = !talking;
-            printf("  frame %4d (%3d before the door): %s at (%.0f %.0f %.0f)\n", frame, frames - frame,
+            printf("  frame %4d (%3d before the end): %s at (%.0f %.0f %.0f)\n", frame, frames - frame,
                    talking ? "a cutscene starts" : "the cutscene ends", sm64_pos(env, 0), sm64_pos(env, 1),
                    sm64_pos(env, 2));
         }
     }
     if (opened == frames) {
-        printf("the door opened at frame %d, as it should\n", opened);
+        printf("%s at frame %d, as it should be\n", goal, opened);
     } else if (opened >= 0) {
-        printf("the door opened at frame %d, not %d\n", opened, frames);
+        printf("%s at frame %d, not %d\n", goal, opened, frames);
     } else {
-        printf("the door never opened; Mario ended at (%.0f %.0f %.0f)\n", sm64_pos(env, 0), sm64_pos(env, 1),
-               sm64_pos(env, 2));
+        printf("never reached %s; Mario ended at (%.0f %.0f %.0f), %.0f units from it across the ground\n", goal,
+               sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2),
+               sm64_goal_distance(env, sm64_pos(env, 0), sm64_pos(env, 2)));
     }
     c_close(env);
     free(inputs);
@@ -330,12 +367,14 @@ int main(int argc, char** argv) {
         return bench(argc > 2 ? atoi(argv[2]) : 8, argc > 3 ? atoi(argv[3]) : 300);
     }
     if (strcmp(what, "explore") == 0) {
-        return explore(argc > 2 ? atoi(argv[2]) : 8, argc > 3 ? atof(argv[3]) : 600.0);
+        return explore(argc > 2 ? atoi(argv[2]) : 8, argc > 3 ? atof(argv[3]) : 600.0,
+                       argc > 4 ? atoi(argv[4]) : EXPLORE_TICKS);
     }
     if (strcmp(what, "replay") == 0) {
-        return replay(argc > 2 && strcmp(argv[2], "watch") == 0);
+        int window = argc > 2 && strcmp(argv[2], "watch") == 0;
+        return replay(window, argc > 2 + window ? argv[2 + window] : sm64_demo_path());
     }
     printf("usage: sm64 [state | watch [forward|random|door] | probe [forward|random|door] | bench [games]\n"
-           "            | explore [games] [seconds] | replay [watch]]\n");
+           "            | explore [games] [seconds] [frames] | replay [watch] [file]]\n");
     return 2;
 }

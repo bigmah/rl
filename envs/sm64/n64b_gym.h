@@ -100,6 +100,19 @@ static inline uint8_t n64_u8(const N64Gym* gym, uint32_t address) {
     return gym->memory[(address ^ 3) - N64B_GYM_RDRAM_BASE];
 }
 
+// Writing is the same arithmetic the other way. It is for setting a game up --
+// moving a warp, placing Mario to see what is there -- never for playing it.
+
+static inline void n64_set_u32(N64Gym* gym, uint32_t address, uint32_t value) {
+    memcpy(gym->memory + (address - N64B_GYM_RDRAM_BASE), &value, sizeof(value));
+}
+
+static inline void n64_set_f32(N64Gym* gym, uint32_t address, float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    n64_set_u32(gym, address, bits);
+}
+
 /// Whether an address is one the console has memory at. A pointer read out of
 /// the game is worth checking before it is followed: a null one is ordinary
 /// (Mario has no wall to his left), and a wild one means something read the

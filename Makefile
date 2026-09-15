@@ -43,7 +43,7 @@ sm64-train: sm64 sm64-state
 # Go-Explore's first phase with no policy: random play from the archive until it
 # has opened the door, keeping the fastest run in build/sm64/door.demo
 sm64-explore: sm64
-	./build/sm64_tool explore $(or $(GAMES),8) $(or $(SECONDS),600)
+	./build/sm64_tool explore $(or $(GAMES),8) $(or $(SECONDS),600) $(or $(FRAMES),900)
 
 # Go-Explore's second phase: train a policy to open the door from the real
 # start, working back along that demo. Only the door and the clock pay.

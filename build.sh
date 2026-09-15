@@ -121,6 +121,8 @@ for game in library.get("games", []):
 #define SM64_CONFIG_DIR "$(pwd)/$BUILD/sm64/n64b"
 #define SM64_STATE "$(pwd)/$BUILD/sm64/castle-grounds.state"
 #define SM64_DEMO "$(pwd)/$BUILD/sm64/door.demo"
+#define SM64_STAR_STATE "$(pwd)/$BUILD/sm64/bob-omb-battlefield.state"
+#define SM64_STAR_DEMO "$(pwd)/$BUILD/sm64/star.demo"
 #define SM64_LOG "$(pwd)/$BUILD/sm64/game.log"
 PATHS
     ENV_INCLUDES+=(-I"$BUILD/sm64" -I"$N64BUNDLER/ModernReality/include/modernreality")
