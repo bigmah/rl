@@ -326,6 +326,7 @@ static int replay(int window, const char* path) {
     int frame = 0;
     int opened = -1;
     int talking = 0;
+    double started = now();
     for (int k = 0; k < count && opened < 0; k++) {
         n64gym_pad(&env->gym, inputs[k].buttons, inputs[k].stick_x, inputs[k].stick_y);
         if (!n64gym_step(&env->gym, inputs[k].frames)) {
@@ -334,6 +335,15 @@ static int replay(int window, const char* path) {
         }
         frame += inputs[k].frames;
         c_render(env);
+        /* In a window it is being watched, so it is played at the speed a
+         * console ran it rather than the three times that it replays at. */
+        if (window) {
+            double late = started + frame / 30.0 - now();
+            if (late > 0.0) {
+                struct timespec rest = {(time_t)late, (long)((late - (double)(time_t)late) * 1e9)};
+                nanosleep(&rest, NULL);
+            }
+        }
         uint32_t action = sm64_action(env);
         if (sm64_goal_reached(env)) {
             opened = frame;

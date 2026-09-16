@@ -391,6 +391,12 @@ static inline float sm64_vel(SM64* env, int axis) {
 static inline float sm64_forward_vel(SM64* env) {
     return n64_f32(&env->gym, env->mario + M_FORWARD_VEL);
 }
+/* Whether there is any floor under him at all. The game keeps the surface he
+ * would land on in mario->floor, and it is null only where nothing is below:
+ * off the side of a course, falling to the death plane. */
+static inline int sm64_in_the_world(SM64* env) {
+    return n64_is_ram(n64_u32(&env->gym, env->mario + M_FLOOR));
+}
 static inline int sm64_face_yaw(SM64* env) {
     return n64_s16(&env->gym, env->mario + M_FACE_ANGLE + 2);
 }
@@ -627,6 +633,16 @@ static int sm64_archive_start(SM64* env) {
 }
 
 static float sm64_novelty(SM64* env, float x, float y, float z) {
+    /* A place is somewhere Mario could be. Falling out of the world is not: a
+     * cube is novelty_cell units, so a fall through empty space enters a fresh
+     * one every novelty_cell units down, and novelty would be paying for the
+     * fall -- in a course whose only way to lose is going over the side, paying
+     * to lose. The archive would keep those cubes too, and few runs fall down
+     * the same column, so they would be among the rarest -- which is what it
+     * draws first, restarting episodes midway through a fall. */
+    if (!sm64_in_the_world(env)) {
+        return 0.0f;
+    }
     int cube = sm64_cube(env, x, y, z);
     if (cube < 0 || env->entered[cube] == env->episode) {
         return 0.0f;
