@@ -179,12 +179,19 @@
  * says which star, where it is, or what makes it appear.
  *
  * Which course, and which act. SM64_LEVEL is the course -- 9 is Bob-omb
- * Battlefield and 24 is Whomp's Fortress, which is the one whose stars are out
- * in the open to be climbed to. A course's objects depend on the act it was
- * entered for, and the act select only offers what the save file has, which for
- * a new file is the first and nothing else. The act is a halfword in memory, so
- * SM64_ACT writes it over the selected one while the course loads, before the
- * level script spawns anything -- which is what decides which star is there.
+ * Battlefield, 24 is Whomp's Fortress, whose stars are out in the open to be
+ * climbed to, and 27 is Peach's Secret Slide, where the star is at the bottom
+ * of a slide and gravity does most of the work. A course's objects depend on
+ * the act it was entered for, and the act select only offers what the save file
+ * has, which for a new file is the first and nothing else. The act is a
+ * halfword in memory, so SM64_ACT writes it over the selected one while the
+ * course loads, before the level script spawns anything -- which is what
+ * decides which star is there.
+ *
+ * A secret course -- the slides, and the ones behind the castle's other doors --
+ * has no act select: there is one way in and one course, and the game keeps its
+ * act at 0. So for one of those the act is left alone, nothing is written over
+ * it, and A is not pressed on the way in.
  *
  * Only the goal moves: the clock, novelty, the archive and the demo are the
  * same, and nothing in the reward or the observation says where a star is.
@@ -194,6 +201,7 @@
  */
 #define LEVEL_BOB 9
 #define LEVEL_WF 24                /* Whomp's Fortress */
+#define LEVEL_PSS 27               /* Peach's Secret Slide, which has no act select */
 #define CURR_COURSE_NUM 0x8033BAC6 /* s16; Bob-omb Battlefield is course 1 */
 #define CURR_ACT_NUM 0x8033BAC8    /* s16 */
 #define DOOR_WARP_NODE_LEFT 0x80196414
@@ -684,6 +692,10 @@ static void sm64_watch_camera(SM64* env) {
     env->camera_offset = (int16_t)(intended - env->last_stick_angle);
 }
 
+/* Whether the course asks which act it is being entered for. A secret course
+ * does not: it drops Mario straight in and leaves the act at 0. */
+static inline int sm64_level_selects_act(int level) { return level != LEVEL_PSS; }
+
 /* --- getting to the castle grounds ------------------------------------------
  *
  * Two presses of Start reach the file select and open the first file; from
@@ -700,6 +712,8 @@ static void sm64_watch_camera(SM64* env) {
  * (see DOOR_WARP_NODE_LEFT) and Mario is put in front of it with the stick
  * pushed forward. He opens it, the game fades to the act select, A picks act
  * 1 -- the only act a new save has -- and he lands at the start of the course.
+ * A secret course has no act select, so there A is not pressed and the act is
+ * left where the game put it.
  */
 static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, int act, char* error,
                            size_t error_size) {
@@ -756,13 +770,15 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
     n64_set_f32(gym, mario + M_POS + 4, 803.0f);
     n64_set_f32(gym, mario + M_POS + 8, -2900.0f);
 
+    int selects_act = sm64_level_selects_act(level);
     int spawned = 0, landed = 0;
     for (int i = 0; i < 1500 && !landed; i++) {
         int now_in = n64_s16(gym, CURR_LEVEL_NUM);
         /* Up on the stick until the door has him, then A for the act select --
-         * but not once he has appeared in the course, where A is a jump. */
-        n64gym_pad(gym, (now_in == level && !spawned && (i % 16) < 2) ? BUTTON_A : 0, 0.0f,
-                   now_in == LEVEL_CASTLE_GROUNDS ? 1.0f : 0.0f);
+         * but not once he has appeared in the course, where A is a jump, and
+         * not at all for a course that never asks. */
+        n64gym_pad(gym, (selects_act && now_in == level && !spawned && (i % 16) < 2) ? BUTTON_A : 0,
+                   0.0f, now_in == LEVEL_CASTLE_GROUNDS ? 1.0f : 0.0f);
         if (!n64gym_step(gym, 1)) {
             snprintf(error, error_size, "the game stopped on the way to level %d: %s", level, gym->error);
             return 0;
@@ -770,7 +786,7 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
         /* The act the save file could not offer, written over the one it did,
          * every frame of the load: the level script reads it when it spawns the
          * course's objects, and that is what decides which star is there. */
-        if (n64_s16(gym, CURR_LEVEL_NUM) == level) {
+        if (selects_act && n64_s16(gym, CURR_LEVEL_NUM) == level) {
             n64_set_s16(gym, CURR_ACT_NUM, (int16_t)act);
         }
         mario = n64_u32(gym, MARIO_STATE_PTR);
@@ -778,7 +794,8 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
         spawned = spawned || (n64_s16(gym, CURR_LEVEL_NUM) == level && (action & ACT_FLAG_AIR));
         landed = spawned && action == ACT_IDLE;
     }
-    if (!landed || n64_s16(gym, CURR_LEVEL_NUM) != level || n64_s16(gym, CURR_ACT_NUM) != act) {
+    if (!landed || n64_s16(gym, CURR_LEVEL_NUM) != level ||
+        (selects_act && n64_s16(gym, CURR_ACT_NUM) != act)) {
         snprintf(error, error_size,
                  "the door never left Mario standing in level %d act %d (level %d course %d act %d)", level,
                  act, n64_s16(gym, CURR_LEVEL_NUM), n64_s16(gym, CURR_COURSE_NUM),
@@ -836,6 +853,9 @@ static int sm64_star_level(void) {
 }
 
 static int sm64_star_act(void) {
+    if (!sm64_level_selects_act(sm64_star_level())) {
+        return 0; /* what the game keeps for a secret course */
+    }
     int act = atoi(sm64_setting("SM64_ACT", "1"));
     return act >= 1 && act <= 6 ? act : 1;
 }

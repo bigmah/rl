@@ -35,6 +35,7 @@ make sm64-demo        # no policy at all: hold forward and jump
 make sm64-explore     # Go-Explore phase 1 with no policy: find the door, keep the fastest run
 ./build/sm64_tool replay       # check that run still opens the door (add `watch` to see it)
 make sm64-robustify   # Go-Explore phase 2: train a policy to open it from the real start
+make sm64-slide       # a different goal: the star at the bottom of Peach's Secret Slide
 ```
 
 It needs your own dump of the cartridge, recompiled once: drop `sm64.z64` on N64Bundler so it appears in its library as `NSME`. `build.sh` finds the recompiled game there. Set `N64BUNDLER` if that checkout is not at `../static_recomp/n64bundler`. No game data is copied into this repository, and everything derived from it lands in the gitignored `build/`.
@@ -106,7 +107,7 @@ The log reports:
 
 ### Another course, and what a death costs
 
-`SM64_GOAL=star` races to a star instead of the door, and `SM64_LEVEL` and `SM64_ACT` say which one: 9 is Bob-omb Battlefield, 24 is Whomp's Fortress. The castle door's warp nodes are pointed at that course's painting entry, and the act is written over the selected one while the course loads — a new save file offers only act 1, and the act is what decides which star the level script spawns. Each course and act keeps its own state and demo (`star-level24-act2.state`).
+`SM64_GOAL=star` races to a star instead of the door, and `SM64_LEVEL` and `SM64_ACT` say which one: 9 is Bob-omb Battlefield, 24 is Whomp's Fortress, 27 is Peach's Secret Slide. The castle door's warp nodes are pointed at that course's painting entry, and the act is written over the selected one while the course loads — a new save file offers only act 1, and the act is what decides which star the level script spawns. A secret course has no act select, so there the act is left where the game puts it, which is 0. Each course and act keeps its own state and demo (`star-level24-act2.state`).
 
 ```sh
 SM64_GOAL=star SM64_LEVEL=24 SM64_ACT=2 make sm64-picture ARGS="--env.respawn 1"
@@ -126,6 +127,34 @@ Paying less for a death would have made dying the cheapest way to play, since ev
 | agent steps/s | 1 045 | 1 549 |
 
 Returns go positive because novelty earns more than the clock costs, and deaths per episode climb from 0.1 to about 6 as the policy gets bolder: falling becomes a cost to weigh rather than the end. It still hasn't reached a star.
+
+### Peach's Secret Slide
+
+`SM64_LEVEL=27` is the easiest star in the game to state: the slide drops Mario 6,000 units, the star sits at the bottom of it, and gravity does most of the work. Nothing has to be climbed, fought or timed, and the only way to lose is to go over the side.
+
+```sh
+make sm64-slide   # SM64_GOAL=star SM64_LEVEL=27 and respawn = 1
+```
+
+It is a secret course, so there is no act select: the game keeps its act at 0, nothing is written over it, and A is not pressed on the way in (`star-level27-act0.state`). Everything else — the clock, novelty, the archive, the demo — is the same as any other course.
+
+**It is far easier to stumble into.** Go-Explore's first phase, random buttons from the archive, found the star in 60 seconds and four of them in two minutes. The castle door took 200 seconds for its first, and Whomp's Fortress never reached a star at all. `./build/sm64_tool replay` lands the fastest of them on the same frame it was found on.
+
+**Twenty minutes of training** — the star, the clock and novelty, with the archive on and `respawn = 1` — is 3.81M steps at 3,900 a second:
+
+| steps | cubes entered per episode | distance | episode return | cubes explored | stars |
+|---|---|---|---|---|---|
+| 0.5M | 33 | 16 800 | +0.03 | 1 959 | 0 |
+| 1.4M | 18 | 8 500 | −0.52 | 3 066 | 0 |
+| 2.4M | 35 | 17 300 | −0.13 | 3 552 | 0 |
+| 3.3M | 54 | 27 300 | +0.29 | 4 040 | 1 |
+| 3.8M | 65 | 32 600 | +0.51 | 4 206 | 0 |
+
+One star in 2,653 episodes, still climbing at the end. It started from a cube in the archive rather than from the top of the slide, and `start_perf` never left 0. It is a faster star than the explorer's, though — 1,378 frames from the savestate against 1,940, and it replays.
+
+Both are longer than the 900-frame clock, which the archive's replay doesn't spend, so nothing has yet gone from the top of the slide to the star inside one episode. There is room to: holding forward covers the slide in about 600 frames, and then flies off near the bottom.
+
+**Novelty pays for falling out of the world.** A cube is 500 units, so a fall through empty space enters a fresh one every 500 units down, and each pays `novelty_episode` again in every episode. `sm64_tool probe forward` shows it: at frame 660, off the side of the slide at y −1,675 with no floor under him and nothing below but the death plane, the step pays +0.0678, which is a cube nobody had entered. Worse, those cubes go into the archive, they are rare — few runs fall down the same column — and the archive draws the rarest first, so Go-Explore keeps restarting episodes midway through a fall. In a course whose only failure is falling off, that is paying to lose. Not yet fixed; the fix to try is to treat a cube reached with no floor under Mario as not a place at all.
 
 ### Go-Explore
 
