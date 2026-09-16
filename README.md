@@ -170,6 +170,8 @@ No star this time, which says nothing on its own: at one star in 2,653 episodes,
 
 So exploring the slide is not the thing in the way. Going down it inside one clock is.
 
+Showing the policy the game helps here, which it did not in Whomp's Fortress: at equal steps a picture policy covers about twice the ground, enough to pay for the half of the speed it costs. See the picture, below. It has not reached a star either.
+
 ### Go-Explore
 
 Novelty alone swam the moat for 10M steps. So `sm64.h` also runs [Go-Explore](https://arxiv.org/abs/1901.10995). Its first phase explores: it remembers places and goes back to them before exploring further. Its second phase robustifies: it trains a policy to do reliably, from the real start, what exploring only managed once.
@@ -251,6 +253,22 @@ A state loaded from a file holds framebuffers in whatever condition the game tha
 | stars | 0 | 0 |
 
 Half the speed and no gain. Neither run is long — 2M steps is early for a convolutional encoder learning from a reward this sparse — and both had Mario's 40 numbers in the observation as well, so the picture was only ever extra. The sharper test is `state = 0`, pixels against numbers. The deeper point is that novelty and the archive are what explore here, and both are computed from Mario's position: until *they* come from the picture, what the policy sees can't change where episodes go.
+
+**On Peach's Secret Slide it is worth something.** Twenty minutes each, the same settings but for the picture, and the 40 numbers in both:
+
+| | with the picture | without |
+|---|---|---|
+| steps in twenty minutes | 1.91M | 3.81M |
+| agent steps/s | 1 840 | 3 800 |
+| cubes entered per episode, at 1.2M steps | 53.9 | 22.7 (at 1.4M) |
+| cubes entered per episode, at the end | 73.7 | 65.4 |
+| distance per episode, at the end | 32 900 | 29 300 |
+| cubes explored | 4 440 | 4 789 |
+| stars | 0 | 0 |
+
+At equal steps the picture policy covers about twice the ground, which is enough to pay for half the throughput: it ends ahead on cubes an episode having taken half as many steps, and its entropy is down to 1.7 rather than 2.8, so it is committing to routes rather than jittering. Cubes explored is the one number where it is behind, and that one counts the whole process's exploring, which is half as many episodes.
+
+A slide is where that would be expected to show. The 40 numbers say how fast Mario is going and how steep the floor is, but not that the floor runs out three feet to his left, and on this course that is the only thing there is to know.
 
 An episode ends when the door starts to open, when Mario dies or warps anywhere else, or after `max_ticks` frames (900, thirty seconds).
 
