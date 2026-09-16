@@ -108,6 +108,7 @@
 #ifndef SM64_H
 #define SM64_H
 
+#include <dirent.h>
 #include <limits.h>
 #include <math.h>
 #include <pthread.h>
@@ -1027,6 +1028,100 @@ static void sm64_demo_offer(SM64* env) {
     pthread_mutex_unlock(&sm64_demo_lock);
 }
 
+/* --- the fastest runs, to watch ----------------------------------------------
+ *
+ * The demo keeps one run, and any slower way to the goal is gone when its
+ * episode ends -- and with it the archive's cube it started from, so nothing can
+ * play it again. So every episode that reaches the goal, exploring or not, also
+ * offers its inputs to a folder beside the demo (star-level27-act0.demo ->
+ * star-level27-act0-fastest/), which keeps the FASTEST_RUNS fastest. A file is
+ * named for its frames and a hash of its inputs, 01532-9a3c1e2b.demo, so the
+ * folder lists fastest first and the same run found twice is kept once.
+ * `sm64_tool replay watch <file>` plays one.
+ */
+#ifndef FASTEST_RUNS
+#define FASTEST_RUNS 10
+#endif
+
+static char sm64_fastest_dir[1024];
+static char sm64_fastest[FASTEST_RUNS + 1][32]; /* file names, fastest first */
+static int sm64_fastest_frames[FASTEST_RUNS + 1];
+static int sm64_fastest_count = -1; /* until the folder has been read */
+
+/* Put a run in the list, fastest first. With one too many, the slowest leaves the
+ * list and the folder. */
+static void sm64_fastest_insert(const char* name, int frames) {
+    int k = sm64_fastest_count;
+    while (k > 0 && sm64_fastest_frames[k - 1] > frames) {
+        sm64_fastest_frames[k] = sm64_fastest_frames[k - 1];
+        memcpy(sm64_fastest[k], sm64_fastest[k - 1], sizeof(sm64_fastest[k]));
+        k--;
+    }
+    sm64_fastest_frames[k] = frames;
+    snprintf(sm64_fastest[k], sizeof(sm64_fastest[k]), "%s", name);
+    if (++sm64_fastest_count > FASTEST_RUNS) {
+        char path[1100];
+        snprintf(path, sizeof(path), "%s/%s", sm64_fastest_dir, sm64_fastest[FASTEST_RUNS]);
+        remove(path);
+        sm64_fastest_count = FASTEST_RUNS;
+    }
+}
+
+/* What an earlier run left in the folder, once for the process. */
+static void sm64_fastest_read(void) {
+    const char* demo = sm64_demo_path();
+    size_t stem = strlen(demo);
+    if (stem >= 5 && strcmp(demo + stem - 5, ".demo") == 0) {
+        stem -= 5;
+    }
+    snprintf(sm64_fastest_dir, sizeof(sm64_fastest_dir), "%.*s-fastest", (int)stem, demo);
+    sm64_fastest_count = 0;
+    DIR* dir = opendir(sm64_fastest_dir);
+    if (dir == NULL) {
+        return;
+    }
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        size_t length = strlen(entry->d_name);
+        int frames;
+        if (length < sizeof(sm64_fastest[0]) && length > 5 && strcmp(entry->d_name + length - 5, ".demo") == 0 &&
+            sscanf(entry->d_name, "%d-", &frames) == 1) {
+            sm64_fastest_insert(entry->d_name, frames);
+        }
+    }
+    closedir(dir);
+}
+
+/* This episode has reached the goal: keep it if it is among the fastest. */
+static void sm64_fastest_offer(SM64* env) {
+    pthread_mutex_lock(&sm64_demo_lock);
+    if (sm64_fastest_count < 0) {
+        sm64_fastest_read();
+    }
+    if (sm64_fastest_count < FASTEST_RUNS || env->trail_frames < sm64_fastest_frames[FASTEST_RUNS - 1]) {
+        uint32_t hash = 2166136261u; /* FNV-1a */
+        const uint8_t* byte = (const uint8_t*)env->trail;
+        for (size_t k = 0; k < (size_t)env->trail_count * sizeof(SM64Input); k++) {
+            hash = (hash ^ byte[k]) * 16777619u;
+        }
+        char name[32];
+        snprintf(name, sizeof(name), "%05d-%08x.demo", env->trail_frames, hash);
+        int kept = 0;
+        for (int k = 0; k < sm64_fastest_count; k++) {
+            kept |= strcmp(sm64_fastest[k], name) == 0;
+        }
+        char path[1100];
+        snprintf(path, sizeof(path), "%s/%s", sm64_fastest_dir, name);
+        mkdir(sm64_fastest_dir, 0755);
+        if (!kept && sm64_demo_write(path, (int)env->rng, env->trail, env->trail_count, env->trail_frames)) {
+            sm64_fastest_insert(name, env->trail_frames);
+        } else if (!kept) {
+            fprintf(stderr, "sm64: could not keep a run of %d frames in %s\n", env->trail_frames, path);
+        }
+    }
+    pthread_mutex_unlock(&sm64_demo_lock);
+}
+
 /* Read the demo to robustify, once for the process. */
 static void sm64_demo_load(SM64* env) {
     pthread_mutex_lock(&sm64_demo_lock);
@@ -1222,6 +1317,10 @@ static void sm64_write_observations(SM64* env, float speed) {
         sm64_write_picture(env, obs + NUM_OBS);
     }
     memset(obs, 0, NUM_OBS * sizeof(float));
+    /* The clock is the env's, not the game's, so it is there with state off too:
+     * the reward is made of it, and a critic that cannot see it cannot predict
+     * even an episode that only runs out. */
+    obs[OBS_TIME_LEFT] = 1.0f - (float)env->tick / (float)env->max_ticks;
     if (!env->state) {
         return;
     }
@@ -1259,7 +1358,6 @@ static void sm64_write_observations(SM64* env, float speed) {
     obs[OBS_ACTION_TIMER] = fminf((float)n64_u16(gym, env->mario + M_ACTION_TIMER) / 60.0f, 4.0f);
     obs[OBS_ACTION_STATE] = fminf((float)n64_u16(gym, env->mario + M_ACTION_STATE) / 8.0f, 4.0f);
     obs[OBS_HEALTH] = (float)n64_s16(gym, env->mario + M_HEALTH) / 2176.0f;
-    obs[OBS_TIME_LEFT] = 1.0f - (float)env->tick / (float)env->max_ticks;
 
     obs[OBS_FLAG_STATIONARY] = (action & ACT_FLAG_STATIONARY) ? 1.0f : 0.0f;
     obs[OBS_FLAG_MOVING] = (action & ACT_FLAG_MOVING) ? 1.0f : 0.0f;
@@ -1428,6 +1526,7 @@ void c_step(SM64* env) {
     if (sm64_goal_reached(env)) {
         env->rewards[0] = DOOR_REWARD - step_cost;
         env->episode_return += env->rewards[0];
+        sm64_fastest_offer(env);
         if (env->go_explore > 0.0f) {
             sm64_demo_offer(env);
             sm64_credit_door(env, sm64_cube(env, sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2)));

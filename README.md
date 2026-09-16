@@ -34,6 +34,8 @@ make sm64-demo        # no policy at all: hold forward and jump
 ./build/sm64_tool probe door   # a scripted walk to the door, printing the reward
 make sm64-explore     # Go-Explore phase 1 with no policy: find the door, keep the fastest run
 ./build/sm64_tool replay       # check that run still opens the door (add `watch` to see it)
+SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay watch build/sm64/star-level27-act0-fastest/01326-4f16ec26.demo
+                               # any of the ten fastest runs to the goal, kept by any run, training or exploring
 make sm64-robustify   # Go-Explore phase 2: train a policy to open it from the real start
 make sm64-slide       # a different goal: the star at the bottom of Peach's Secret Slide
 ```
@@ -223,7 +225,7 @@ make sm64-picture   # train with an 80x60 picture of the game in the observation
 make sm64-watch ARGS="--env.picture-width 80 --env.picture-height 60"
 ```
 
-`picture_width` and `picture_height` in `sm64.ini` put the game's frame, shrunk to that size by averaging, after the 40 numbers as RGB in [0, 1]. `mlx_pufferl.py` sees `picture_width` in the env's config and puts the picture through the Nature DQN's three convolutions before the MinGRU, with the 40 numbers alongside. `state = 0` zeroes those numbers, so the policy sees only the picture. The reward still reads the game's memory either way.
+`picture_width` and `picture_height` in `sm64.ini` put the game's frame, shrunk to that size by averaging, after the 40 numbers as RGB in [0, 1]. `mlx_pufferl.py` sees `picture_width` in the env's config and puts the picture through the Nature DQN's three convolutions before the MinGRU, with the 40 numbers alongside. `state = 0` zeroes those numbers but the clock, so the policy sees the picture and how much time is left. The reward still reads the game's memory either way.
 
 Nothing about the picture is specific to Super Mario 64: `n64gym_picture` reads the console's video interface, not the game's variables. With `--picture`, N64Bundler's RT64 renders each frame back into the framebuffer the game drew it into, at the console's own 320×240, as the RDP did. After each step the host reads the frame the video interface will show next (its origin, width, pixel format and gamma) into the shared memory beside the console's RAM. Headless, RT64 renders only that, on a window that's never shown. That's patches `0022`-`0023` in N64Bundler's series.
 
