@@ -48,6 +48,7 @@ typedef struct {
     const char* config_dir; // where librecomp keeps its copy of the ROM and the saves
     const char* log;        // where the game's own output goes, or NULL to inherit ours
     int windowed;           // draw it, for watching a policy play
+    int picture;            // hand over every frame as a picture: see n64gym_picture
     int index;              // which of several games this is
 } N64GymOptions;
 
@@ -105,6 +106,10 @@ static inline uint8_t n64_u8(const N64Gym* gym, uint32_t address) {
 
 static inline void n64_set_u32(N64Gym* gym, uint32_t address, uint32_t value) {
     memcpy(gym->memory + (address - N64B_GYM_RDRAM_BASE), &value, sizeof(value));
+}
+
+static inline void n64_set_s16(N64Gym* gym, uint32_t address, int16_t value) {
+    memcpy(gym->memory + ((address ^ 2) - N64B_GYM_RDRAM_BASE), &value, sizeof(value));
 }
 
 static inline void n64_set_f32(N64Gym* gym, uint32_t address, float value) {
@@ -240,6 +245,7 @@ static int n64gym_open(N64Gym* gym, const N64GymOptions* options) {
     argv[argc++] = (char*)"--config-dir";
     argv[argc++] = config;
     if (!options->windowed) argv[argc++] = (char*)"--headless";
+    if (options->picture) argv[argc++] = (char*)"--picture";
     argv[argc] = NULL;
 
     posix_spawn_file_actions_t actions;
@@ -315,6 +321,30 @@ static inline int n64gym_load_state(N64Gym* gym, const char* path) {
 }
 
 static inline uint64_t n64gym_frames(const N64Gym* gym) { return gym->block->frames; }
+
+/// Which frames of each step get drawn, from the next step on: every one, only
+/// the last (the one the picture is of), or none, for getting somewhere with no
+/// picture wanted. Only a headless game with a picture draws at all, and see
+/// `n64b_gym_draw` for when skipping is wrong.
+static inline void n64gym_draw(N64Gym* gym, enum n64b_gym_draw draw) {
+    gym->block->draw = (uint32_t)draw;
+}
+
+/// What the game looks like: the frame its video interface will show next, as
+/// rows of 8-bit RGBA, top to bottom. Only a game opened with `picture` has one,
+/// and it is fresh after every step or load. Returns NULL, with the size zero,
+/// while there is no picture -- a blanked screen, or a game not asked for one.
+///
+/// This is the one thing here that is the same for every game: it needs no
+/// address out of any game's memory, only the console's own video interface.
+static inline const uint8_t* n64gym_picture(const N64Gym* gym, int* width, int* height) {
+    *width = (int)gym->block->picture_width;
+    *height = (int)gym->block->picture_height;
+    if (*width == 0 || *height == 0) {
+        return NULL;
+    }
+    return (const uint8_t*)gym->block + N64B_GYM_PICTURE_OFFSET;
+}
 
 static void n64gym_close(N64Gym* gym) {
     if (gym->socket >= 0) {

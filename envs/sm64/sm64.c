@@ -37,8 +37,13 @@ static SM64* make_env(int index, int window) {
     env->go_explore_door = 0.0f;
     env->backward = 0.0f;
     env->window = window;
+    env->state = 1;
+    /* SM64_PICTURE=80x60 draws the game and puts its picture in the observation,
+     * as training with picture_width and picture_height does. */
+    sscanf(sm64_setting("SM64_PICTURE", "0x0"), "%dx%d", &env->picture_width, &env->picture_height);
     env->rng = (unsigned)index;
-    env->observations = (float*)calloc(NUM_OBS, sizeof(float));
+    env->observations =
+        (float*)calloc(NUM_OBS + env->picture_width * env->picture_height * PICTURE_CHANNELS, sizeof(float));
     env->actions = (float*)calloc(ACTION_HEADS, sizeof(float));
     env->rewards = (float*)calloc(1, sizeof(float));
     env->terminals = (float*)calloc(1, sizeof(float));
@@ -75,7 +80,8 @@ static int make_state(void) {
            now() - started);
 
     char error[256];
-    if (!sm64_make_state(&gym, path, sm64_star_goal(), error, sizeof(error))) {
+    if (!sm64_make_state(&gym, path, sm64_star_goal(), sm64_star_level(), sm64_star_act(), error,
+                         sizeof(error))) {
         printf("%s\n", error);
         n64gym_close(&gym);
         return 1;

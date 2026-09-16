@@ -5,7 +5,8 @@ following the structure of its PyTorch reference (pufferlib/torch_pufferl.py)
 but matching CUDA where the two differ: bias-free layers, one decoder matrix
 for logits and value, sqrt(2) encoder init, the CUDA advantage kernel, and
 entropy coefficient annealing. The policy is PufferLib's default (Linear
-encoder -> MinGRU -> Linear decoder) optimized by Muon.
+encoder -> MinGRU -> Linear decoder) optimized by Muon, with a convolutional encoder
+in front for an env whose observation ends in a picture.
 
 It plugs into PufferLib's own CLI, configs, dashboard, checkpointing and eval loop:
 
@@ -74,14 +75,52 @@ class MinGRU(nn.Module):
             h = _highway(h, out, proj)
         return h
 
+class PictureEncoder(nn.Module):
+    '''For an observation that ends in a picture: the picture through the Nature DQN's
+    three convolutions, and what comes before it alongside, into the one Linear encoder.
+
+    The picture is the observation's last height * width * channels numbers, rows from
+    the top, channels last, which is the layout the env writes and the one MLX's
+    convolutions take. Bias-free with sqrt(2) gain, like the default encoder.'''
+    def __init__(self, obs_size, picture_shape, hidden_size):
+        super().__init__()
+        height, width, channels = picture_shape
+        self.picture_shape = picture_shape
+        self.features = obs_size - height * width * channels
+        self.convs = [
+            nn.Conv2d(channels, 32, 8, stride=4, bias=False),
+            nn.Conv2d(32, 64, 4, stride=2, bias=False),
+            nn.Conv2d(64, 64, 3, stride=1, bias=False),
+        ]
+        for conv in self.convs:
+            conv.weight = conv.weight * math.sqrt(2)
+        for kernel, stride in ((8, 4), (4, 2), (3, 1)):
+            height, width = (height - kernel) // stride + 1, (width - kernel) // stride + 1
+        if height < 1 or width < 1:
+            raise ValueError(f'a {picture_shape[1]}x{picture_shape[0]} picture is too small for the convolutions')
+        self.linear = nn.Linear(self.features + height * width * 64, hidden_size, bias=False)
+        self.linear.weight = self.linear.weight * math.sqrt(2)
+
+    def __call__(self, obs):
+        leading = obs.shape[:-1]
+        x = obs[..., self.features:].reshape(-1, *self.picture_shape)
+        for conv in self.convs:
+            x = nn.relu(conv(x))
+        x = x.reshape(*leading, -1)
+        return self.linear(mx.concatenate([obs[..., :self.features], x], axis=-1))
+
 class Policy(nn.Module):
     '''PufferLib's default policy as models.cu builds it: bias-free encoder, MinGRU,
-    and a single decoder matrix whose last row is the value head'''
-    def __init__(self, obs_size, num_logits, hidden_size, num_layers):
+    and a single decoder matrix whose last row is the value head. With a picture_shape,
+    the encoder is a PictureEncoder instead'''
+    def __init__(self, obs_size, num_logits, hidden_size, num_layers, picture_shape=None):
         super().__init__()
-        # MLX's Linear init is U(+-1/sqrt(fan_in)), same as CUDA at gain 1; the encoder uses gain sqrt(2)
-        self.encoder = nn.Linear(obs_size, hidden_size, bias=False)
-        self.encoder.weight = self.encoder.weight * math.sqrt(2)
+        if picture_shape is not None:
+            self.encoder = PictureEncoder(obs_size, picture_shape, hidden_size)
+        else:
+            # MLX's Linear init is U(+-1/sqrt(fan_in)), same as CUDA at gain 1; the encoder uses gain sqrt(2)
+            self.encoder = nn.Linear(obs_size, hidden_size, bias=False)
+            self.encoder.weight = self.encoder.weight * math.sqrt(2)
         self.network = MinGRU(hidden_size, num_layers)
         self.decoder = nn.Linear(hidden_size, num_logits + 1, bias=False)
 
@@ -469,8 +508,16 @@ class PuffeRL:
 
         mx.random.seed(args['train']['seed'])
         policy_config = args['policy']
+        # An env that shows its policy a picture puts it last in the observation, RGB,
+        # and says how big it is in its own config
+        picture_shape = None
+        width, height = int(args['env'].get('picture_width', 0)), int(args['env'].get('picture_height', 0))
+        if width > 0 and height > 0:
+            picture_shape = (height, width, 3)
+            if vec.obs_size < height * width * 3:
+                raise ValueError(f'an observation of {vec.obs_size} has no room for a {width}x{height} picture')
         policy = Policy(vec.obs_size, sum(vec.act_sizes),
-            int(policy_config['hidden_size']), int(policy_config['num_layers']))
+            int(policy_config['hidden_size']), int(policy_config['num_layers']), picture_shape)
         mx.eval(policy.parameters())
         pufferl = cls(args, vec, policy)
 

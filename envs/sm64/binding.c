@@ -1,5 +1,9 @@
 #include "sm64.h"
-#define OBS_SIZE NUM_OBS
+// Mario's state, and after it the picture when there is one. How big that is
+// comes from the env's config, so it is known once my_vec_init has read it --
+// which is before the vecenv sizes anything by it.
+static int sm64_obs_size = NUM_OBS;
+#define OBS_SIZE sm64_obs_size
 #define NUM_ATNS ACTION_HEADS
 // stick direction (none, then sixteen ways round), then A, B and Z
 #define ACT_SIZES {STICK_DIRECTIONS + 1, 2, 2, 2}
@@ -19,6 +23,8 @@ Env* my_vec_init(int* num_envs_out, int* buffer_env_starts, int* buffer_env_coun
     int total_agents = (int)dict_get(vec_kwargs, "total_agents")->value;
     int num_buffers = (int)dict_get(vec_kwargs, "num_buffers")->value;
     int agents_per_buffer = total_agents / num_buffers;
+    sm64_obs_size = NUM_OBS + (int)dict_get(env_kwargs, "picture_width")->value *
+                                  (int)dict_get(env_kwargs, "picture_height")->value * PICTURE_CHANNELS;
 
     Env* envs = (Env*)calloc(total_agents, sizeof(Env));
     int num_envs = 0;
@@ -61,12 +67,16 @@ void my_init(Env* env, Dict* kwargs) {
     env->novelty = (float)dict_get(kwargs, "novelty")->value;
     env->novelty_episode = (float)dict_get(kwargs, "novelty_episode")->value;
     env->novelty_cell = (float)dict_get(kwargs, "novelty_cell")->value;
+    env->respawn = (int)dict_get(kwargs, "respawn")->value;
     env->go_explore = (float)dict_get(kwargs, "go_explore")->value;
     env->go_explore_door = (float)dict_get(kwargs, "go_explore_door")->value;
     env->backward = (float)dict_get(kwargs, "backward")->value;
     env->backward_step = (int)dict_get(kwargs, "backward_step")->value;
     env->backward_rate = (float)dict_get(kwargs, "backward_rate")->value;
     env->window = (int)dict_get(kwargs, "window")->value;
+    env->picture_width = (int)dict_get(kwargs, "picture_width")->value;
+    env->picture_height = (int)dict_get(kwargs, "picture_height")->value;
+    env->state = (int)dict_get(kwargs, "state")->value;
     init(env);
 }
 
@@ -92,4 +102,5 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "airborne", log->airborne);
     dict_set(out, "dialog", log->dialog);
     dict_set(out, "ended_early", log->ended_early);
+    dict_set(out, "deaths", log->deaths);
 }

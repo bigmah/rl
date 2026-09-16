@@ -104,6 +104,29 @@ The log reports:
 - `from_start` and `start_perf`: the share of episodes that began where the task does, and the share that began there and opened the door. `start_perf / from_start` is the door rate that counts.
 - `archive`, `replayed`, `door_cubes` and `frontier`: see Go-Explore, below.
 
+### Another course, and what a death costs
+
+`SM64_GOAL=star` races to a star instead of the door, and `SM64_LEVEL` and `SM64_ACT` say which one: 9 is Bob-omb Battlefield, 24 is Whomp's Fortress. The castle door's warp nodes are pointed at that course's painting entry, and the act is written over the selected one while the course loads — a new save file offers only act 1, and the act is what decides which star the level script spawns. Each course and act keeps its own state and demo (`star-level24-act2.state`).
+
+```sh
+SM64_GOAL=star SM64_LEVEL=24 SM64_ACT=2 make sm64-picture ARGS="--env.respawn 1"
+```
+
+A death, or any warp out of the course, ends the episode and pays whatever is left of the clock at once, so stopping the clock early is never a way to lose less. That's right where Mario has to go out of his way to die, and wrong in a fortress in the sky: **70% of episodes ended in a death**, most inside the first half of the clock, and each one entered 12 new cubes where a full episode enters 60. Dying in a course throws Mario out of it — back to the castle, one life gone — so the episode really is over as far as the game is concerned.
+
+Paying less for a death would have made dying the cheapest way to play, since every frame costs clock. `respawn = 1` keeps the clock instead: the savestate goes back, the episode carries on from where the death left it, and a death costs the time it wasted and the ground it gave up. The archive stays honest because the game is that savestate to the bit again, so the trail it keeps starts empty and still replays. Over 21 minutes in Whomp's Fortress:
+
+| | respawn = 0 | respawn = 1 |
+|---|---|---|
+| episode length (of 450 steps) | 206 | 450 |
+| ended in a death | 69% | 0% |
+| cubes entered per episode | 12 | 60 |
+| episode return | −0.61 | +0.55 |
+| distance per episode | 3 900 | 22 000 |
+| agent steps/s | 1 045 | 1 549 |
+
+Returns go positive because novelty earns more than the clock costs, and deaths per episode climb from 0.1 to about 6 as the policy gets bolder: falling becomes a cost to weigh rather than the end. It still hasn't reached a star.
+
 ### Go-Explore
 
 Novelty alone swam the moat for 10M steps. So `sm64.h` also runs [Go-Explore](https://arxiv.org/abs/1901.10995). Its first phase explores: it remembers places and goes back to them before exploring further. Its second phase robustifies: it trains a policy to do reliably, from the real start, what exploring only managed once.
@@ -146,6 +169,46 @@ Four discrete heads: a stick direction (none, or one of sixteen **relative to th
 
 The observation is 40 floats: position, velocity, forward velocity, the speed just achieved, his facing and the camera relative to it, height above the floor, the floor's steepness, headroom, whether he is on a wall, in water or in the air, his action's group and flags, and the clock. Nothing in it is about the door.
 
+### The picture
+
+Those 40 numbers are about Mario and nothing else. They don't show the moat, the bridge, a Bob-omb or a star. A player sees all of that, so the policy can also be shown the game:
+
+```sh
+make sm64-picture   # train with an 80x60 picture of the game in the observation
+make sm64-watch ARGS="--env.picture-width 80 --env.picture-height 60"
+```
+
+`picture_width` and `picture_height` in `sm64.ini` put the game's frame, shrunk to that size by averaging, after the 40 numbers as RGB in [0, 1]. `mlx_pufferl.py` sees `picture_width` in the env's config and puts the picture through the Nature DQN's three convolutions before the MinGRU, with the 40 numbers alongside. `state = 0` zeroes those numbers, so the policy sees only the picture. The reward still reads the game's memory either way.
+
+Nothing about the picture is specific to Super Mario 64: `n64gym_picture` reads the console's video interface, not the game's variables. With `--picture`, N64Bundler's RT64 renders each frame back into the framebuffer the game drew it into, at the console's own 320×240, as the RDP did. After each step the host reads the frame the video interface will show next (its origin, width, pixel format and gamma) into the shared memory beside the console's RAM. Headless, RT64 renders only that, on a window that's never shown. That's patches `0022`-`0023` in N64Bundler's series.
+
+What it costs, with 8 games on an M4 Pro:
+
+| | agent steps/s |
+|---|---|
+| headless, no picture | 8 900 |
+| picture, every frame drawn | 1 800 |
+| picture, last frame of each step drawn | 2 550 |
+| training with a picture policy (80×60) | 1 400–2 100 |
+
+Most of a picture step is RT64: turning the display list into GPU work, then waiting for the GPU. Converting the picture costs next to nothing. A step is two frames and only the second is ever seen, so the env draws only the last frame of each step, and nothing at all while it replays a way to a starting cube. That's safe here because Super Mario 64 draws every frame from nothing. It would be wrong for a game that builds a frame out of the one before it.
+
+Drawing doesn't change how the game plays: `SM64_PICTURE=80x60 ./build/sm64_tool replay` opens the door on the same frame (690) as it does headless, and `SM64_PICTURE=80x60 ./build/sm64_tool bench 8 1000` measures the speed.
+
+A state loaded from a file holds framebuffers in whatever condition the game that saved it left them. So after a load there's no picture (the observation's picture is black) until a frame has been drawn.
+
+**What it's worth so far: nothing measurable.** Two runs of Whomp's Fortress act 2, same settings but for the picture, compared at 1.9M steps:
+
+| | with the picture | without |
+|---|---|---|
+| cubes entered per episode | 59.7 | 62.4 |
+| episode return | 0.50 | 0.57 |
+| cubes explored | 2 479 | 2 646 |
+| agent steps/s | 1 549 | 3 203 |
+| stars | 0 | 0 |
+
+Half the speed and no gain. Neither run is long — 2M steps is early for a convolutional encoder learning from a reward this sparse — and both had Mario's 40 numbers in the observation as well, so the picture was only ever extra. The sharper test is `state = 0`, pixels against numbers. The deeper point is that novelty and the archive are what explore here, and both are computed from Mario's position: until *they* come from the picture, what the policy sees can't change where episodes go.
+
 An episode ends when the door starts to open, when Mario dies or warps anywhere else, or after `max_ticks` frames (900, thirty seconds).
 
 ### What this needed from the runtime
@@ -174,7 +237,7 @@ Each game keeps more than a core busy — its own threads, and the renderer's �
 ## Training on the Mac GPU with MLX
 
 `mlx_pufferl.py` ports PufferLib's CUDA trainer to [MLX](https://github.com/ml-explore/mlx), so training runs on the Apple Silicon GPU. It uses PufferLib's regular policy and PPO variant:
-- **Policy:** Linear encoder, then a 4-layer MinGRU (hidden size 128), then a Linear decoder.
+- **Policy:** Linear encoder, then a 4-layer MinGRU (hidden size 128), then a Linear decoder. For an env whose config names a `picture_width` and `picture_height`, the last `width × height × 3` observation values are a picture, and three convolutions go in front of the encoder.
 - **PPO:** V-trace-clipped advantages, prioritized minibatches and the Muon optimizer.
 
 It follows `pufferlib/torch_pufferl.py` but matches the CUDA kernels where the two differ:
@@ -191,7 +254,7 @@ uv run python mlx_pufferl.py train platformer [--train.total-timesteps 20_000_00
 uv run python mlx_pufferl.py eval platformer --load-model-path latest --vec.total-agents 1
 ```
 
-The env still steps on the CPU (C with OpenMP). Advantages and minibatch sampling run in numpy; the policy and PPO updates run on the GPU. Limits: only the default MinGRU policy and discrete actions are implemented. Checkpoints hold MLX weights (numpy `.npz` data under puffer's `.bin` names), so PufferLib's torch and CUDA backends can't load them.
+The env still steps on the CPU (C with OpenMP). Advantages and minibatch sampling run in numpy; the policy and PPO updates run on the GPU. Limits: only the default MinGRU policy (with or without the picture encoder) and discrete actions are implemented. Checkpoints hold MLX weights (numpy `.npz` data under puffer's `.bin` names), so PufferLib's torch and CUDA backends can't load them.
 
 ## Setup (macOS, Apple Silicon)
 

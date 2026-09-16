@@ -1,4 +1,4 @@
-.PHONY: setup build play train eval sm64 sm64-state sm64-watch sm64-bench sm64-probe sm64-explore sm64-robustify
+.PHONY: setup build play train eval sm64 sm64-state sm64-watch sm64-bench sm64-probe sm64-explore sm64-robustify sm64-picture
 
 # Which env is built into PufferLib's extension. One at a time, which is
 # PufferLib's own shape: make ENV=sm64 train builds sm64 and trains it.
@@ -53,6 +53,12 @@ sm64-robustify: sm64
 	uv run python mlx_pufferl.py train sm64 --env.backward 0.8 --env.go-explore 0 \
 		--env.novelty 0 --env.novelty-episode 0 \
 		--train.target-entropy 0 --train.ent-coef 0.01 --train.learning-rate 0.005 $(ARGS)
+
+# Train with the policy looking at the game: an 80 by 60 picture of it in the
+# observation, through a small convolutional net. About a quarter of the speed.
+# Watch one with: make sm64-watch ARGS="--env.picture-width 80 --env.picture-height 60"
+sm64-picture: sm64
+	uv run python mlx_pufferl.py train sm64 --env.picture-width 80 --env.picture-height 60 $(ARGS)
 
 # Watch the most recent checkpoint play, in a window, at the speed a console ran
 sm64-watch: sm64
