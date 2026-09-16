@@ -154,7 +154,21 @@ One star in 2,653 episodes, still climbing at the end. It started from a cube in
 
 Both are longer than the 900-frame clock, which the archive's replay doesn't spend, so nothing has yet gone from the top of the slide to the star inside one episode. There is room to: holding forward covers the slide in about 600 frames, and then flies off near the bottom.
 
-**Novelty pays for falling out of the world.** A cube is 500 units, so a fall through empty space enters a fresh one every 500 units down, and each pays `novelty_episode` again in every episode. `sm64_tool probe forward` shows it: at frame 660, off the side of the slide at y −1,675 with no floor under him and nothing below but the death plane, the step pays +0.0678, which is a cube nobody had entered. Worse, those cubes go into the archive, they are rare — few runs fall down the same column — and the archive draws the rarest first, so Go-Explore keeps restarting episodes midway through a fall. In a course whose only failure is falling off, that is paying to lose. Not yet fixed; the fix to try is to treat a cube reached with no floor under Mario as not a place at all.
+**Novelty was paying for falling out of the world.** A cube is 500 units, so a fall through empty space enters a fresh one every 500 units down, and each pays `novelty_episode` again in every episode. `sm64_tool probe forward` shows it: at frame 660, off the side of the slide at y −1,675 with no floor under him and nothing below but the death plane, the step paid +0.0678, which is a cube nobody had entered. Worse, those cubes went into the archive, and few runs fall down the same column, so they were among the rarest — which is what it draws first, restarting episodes midway through a fall. In a course whose only way to lose is going over the side, that is paying to lose, twice.
+
+`mario->floor` is null exactly there, so **a cube reached with no floor under Mario is not a place**: it pays nothing and is not archived. The same twenty minutes again:
+
+| steps | cubes entered per episode | distance | episode return | cubes explored | stars |
+|---|---|---|---|---|---|
+| 0.5M | 20 | 10 300 | −0.34 | 1 699 | 0 |
+| 1.4M | 23 | 10 600 | −0.37 | 3 026 | 0 |
+| 2.4M | 47 | 21 600 | +0.21 | 4 116 | 0 |
+| 3.3M | 62 | 29 300 | +0.48 | 4 655 | 0 |
+| 3.8M | 65 | 29 300 | +0.51 | 4 789 | 0 |
+
+No star this time, which says nothing on its own: at one star in 2,653 episodes, one and none in 8,000 episodes each are the same rate. What did change is that every cube is now somewhere Mario could stand, and there are 14% more of them than the run before explored counting the empty air, reached sooner — 47 an episode at 2.4M steps where the run before was at 35.
+
+So exploring the slide is not the thing in the way. Going down it inside one clock is.
 
 ### Go-Explore
 
