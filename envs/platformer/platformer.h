@@ -1,6 +1,6 @@
 /* Platformer: a single-level 2D platformer. Run right, clear the pits and
- * spikes, and touch the flag. The same c_step drives human play
- * (platformer.c) and PufferLib training (binding.c).
+ * spikes, and touch the flag. A PufferLib 5.0 env: the same puf_step drives
+ * human play (platformer.c) and training (vecenv.c).
  *
  * Actions: two discrete heads
  *   move: 0 none, 1 left, 2 right
@@ -14,6 +14,9 @@
 #include <string.h>
 #include <math.h>
 #include "raylib.h"
+
+typedef float obs_t;
+#include "pufferenv.h"
 
 #define LEVEL_W 100
 #define LEVEL_H 18
@@ -57,6 +60,10 @@ static const char LEVEL[LEVEL_H][LEVEL_W + 1] = {
 #define VIEW_H 9
 #define NUM_OBS (3 * VIEW_W * VIEW_H + 8)
 
+#define OBS_SIZE NUM_OBS
+#define NUM_ATNS 2
+#define ACT_SIZES {3, 3}
+
 #define TILE_PX 40
 #define SCREEN_W 1280
 #define SCREEN_H (LEVEL_H * TILE_PX)
@@ -64,7 +71,7 @@ static const char LEVEL[LEVEL_H][LEVEL_W + 1] = {
 enum { TICK_OK, TICK_DEATH, TICK_GOAL, TICK_TIMEOUT };
 
 // Required struct. Only use floats!
-typedef struct {
+struct Log {
     float perf;            // fraction of episodes that reach the flag
     float score;           // furthest progress toward the flag, 0-1
     float episode_return;
@@ -72,7 +79,7 @@ typedef struct {
     float deaths;          // fraction of episodes ending on spikes or in a pit
     float timeouts;        // fraction of episodes that ran out of time
     float n;               // Required as the last field
-} Log;
+};
 
 typedef struct {
     float x, y;    // top-left of the hitbox, in tiles
@@ -85,13 +92,13 @@ typedef struct {
     int facing;  // 1 right, -1 left
 } Client;
 
-typedef struct {
+// Required struct
+struct Env {
     Log log;
+    Agent agents[1];
+    int tag;
+    int boundary_reached;
     Client* client;
-    float* observations;
-    float* actions;
-    float* rewards;
-    float* terminals;
     int num_agents;
     unsigned int rng;  // set by vecenv; the level is deterministic
     int frameskip;     // physics ticks per agent step
@@ -105,7 +112,8 @@ typedef struct {
     int steps;         // agent steps this episode
     float episode_return;
     int wins, total_deaths;  // lifetime counters for the HUD
-} Platformer;
+};
+typedef Env Platformer;
 
 static const Color PUFF_RED = {187, 0, 0, 255};
 static const Color PUFF_CYAN = {0, 187, 187, 255};
@@ -136,7 +144,7 @@ void init(Platformer* env) {
 
 void compute_observations(Platformer* env) {
     Player* p = &env->player;
-    float* obs = env->observations;
+    obs_t* obs = env->agents[0].observations;
     float cx = p->x + PLAYER_W / 2.0f;
     float cy = p->y + PLAYER_H / 2.0f;
     int px = (int)floorf(cx);
@@ -162,7 +170,7 @@ void compute_observations(Platformer* env) {
 }
 
 // Required function
-void c_reset(Platformer* env) {
+void puf_reset(Platformer* env) {
     env->player = (Player){.x = env->spawn_x, .y = env->spawn_y};
     env->best_x = env->spawn_x + PLAYER_W / 2.0f;
     env->tick = 0;
@@ -248,8 +256,9 @@ static int physics_tick(Platformer* env, int move, int vert) {
 }
 
 static void end_episode(Platformer* env, int outcome) {
+    Agent* agent = &env->agents[0];
     float start = env->spawn_x + PLAYER_W / 2.0f;
-    env->episode_return += env->rewards[0];
+    env->episode_return += agent->rewards[0];
     env->log.perf += outcome == TICK_GOAL;
     env->log.score += outcome == TICK_GOAL ? 1.0f : (env->best_x - start) / (env->goal_x - start);
     env->log.episode_return += env->episode_return;
@@ -259,18 +268,19 @@ static void end_episode(Platformer* env, int outcome) {
     env->log.n += 1;
     env->wins += outcome == TICK_GOAL;
     env->total_deaths += outcome == TICK_DEATH;
-    env->terminals[0] = 1.0f;
-    c_reset(env);
+    agent->terminals[0] = 1.0f;
+    puf_reset(env);
 }
 
 // Required function
-void c_step(Platformer* env) {
-    env->rewards[0] = 0.0f;
-    env->terminals[0] = 0.0f;
+void puf_step(Platformer* env) {
+    Agent* agent = &env->agents[0];
+    agent->rewards[0] = 0.0f;
+    agent->terminals[0] = 0.0f;
     env->steps++;
 
-    float a_move = env->actions[0];
-    float a_vert = env->actions[1];
+    float a_move = agent->actions[0];
+    float a_vert = agent->actions[1];
     int move = (a_move >= 0.0f && a_move <= 2.0f) ? (int)a_move : 0;
     int vert = (a_vert >= 0.0f && a_vert <= 2.0f) ? (int)a_vert : 0;
 
@@ -282,33 +292,33 @@ void c_step(Platformer* env) {
 
         float cx = env->player.x + PLAYER_W / 2.0f;
         if (cx > env->best_x) {
-            env->rewards[0] += (cx - env->best_x) * progress_scale;
+            agent->rewards[0] += (cx - env->best_x) * progress_scale;
             env->best_x = cx;
         }
 
         if (outcome == TICK_DEATH) {
-            env->rewards[0] -= env->fail_penalty;
+            agent->rewards[0] -= env->fail_penalty;
             end_episode(env, outcome);
             return;
         }
         if (outcome == TICK_GOAL) {
-            env->rewards[0] += 1.0f;
+            agent->rewards[0] += 1.0f;
             end_episode(env, outcome);
             return;
         }
         if (env->tick >= env->max_ticks) {
             // Same cost as dying: running out the clock never scores better than a failed jump
-            env->rewards[0] -= env->fail_penalty;
+            agent->rewards[0] -= env->fail_penalty;
             end_episode(env, TICK_TIMEOUT);
             return;
         }
     }
-    env->episode_return += env->rewards[0];
+    env->episode_return += agent->rewards[0];
     compute_observations(env);
 }
 
 // Required function. Creates the window on first call
-void c_render(Platformer* env) {
+void puf_render(Platformer* env) {
     if (env->client == NULL) {
         InitWindow(SCREEN_W, SCREEN_H, "PufferLib Platformer");
         SetTargetFPS(60 / env->frameskip);
@@ -384,13 +394,33 @@ void c_render(Platformer* env) {
         16, 40, 20, PUFF_WHITE);
 
     EndDrawing();
+    puf_web_vsync();
 }
 
-// Required function. Do not free observations, actions, rewards, terminals
-void c_close(Platformer* env) {
+// Required function. Do not free the agent buffers: the vecenv owns them
+void puf_close(Platformer* env) {
     if (env->client != NULL) {
         CloseWindow();
         free(env->client);
         env->client = NULL;
     }
+}
+
+// Required function: read this env's settings from [env] in its config
+void puf_init(Env* env, Dict* kwargs) {
+    env->num_agents = 1;
+    env->frameskip = dict_get(kwargs, "frameskip");
+    env->max_ticks = dict_get(kwargs, "max_ticks");
+    env->fail_penalty = dict_get(kwargs, "fail_penalty");
+    init(env);
+}
+
+// Required function: the Log averaged over episodes, by name
+void puf_log(Log* log, Dict* out) {
+    dict_set(out, "perf", log->perf);
+    dict_set(out, "score", log->score);
+    dict_set(out, "episode_return", log->episode_return);
+    dict_set(out, "episode_length", log->episode_length);
+    dict_set(out, "deaths", log->deaths);
+    dict_set(out, "timeouts", log->timeouts);
 }

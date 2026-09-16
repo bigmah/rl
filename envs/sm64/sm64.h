@@ -118,6 +118,9 @@
 #include <sys/stat.h>
 #include <time.h>
 
+typedef float obs_t;
+#include "pufferenv.h"
+
 #include "n64b_gym.h"
 #include "sm64_paths.h" /* written by build.sh: where the game and its pieces are */
 
@@ -289,8 +292,16 @@ enum {
  * [0, 1], row by row from the top. */
 #define PICTURE_CHANNELS 3
 
+/* How big the observation is depends on the picture, which comes from the env's
+ * config, so puf_init sets it -- which is before the vecenv sizes anything by it. */
+static int sm64_obs_size = NUM_OBS;
+#define OBS_SIZE sm64_obs_size
+#define NUM_ATNS ACTION_HEADS
+/* stick direction (none, then sixteen ways round), then A, B and Z */
+#define ACT_SIZES {STICK_DIRECTIONS + 1, 2, 2, 2}
+
 /* Required struct. Only use floats! */
-typedef struct {
+struct Log {
     float perf;            /* fraction of episodes that opened the door */
     float score;           /* fraction of the clock left when the door opened, 0 if it did not */
     float episode_return;
@@ -314,15 +325,15 @@ typedef struct {
     float ended_early;     /* fraction of episodes cut short by a death or a warp that was not the door */
     float deaths;          /* deaths an episode spent; without respawn one ends it, so at most one */
     float n;               /* Required as the last field */
-} Log;
+};
 
-typedef struct {
+/* Required struct */
+struct Env {
     Log log;
+    Agent agents[1];
+    int tag;
+    int boundary_reached;
     void* client;
-    float* observations;
-    float* actions;
-    float* rewards;
-    float* terminals;
     int num_agents;
     unsigned int rng;     /* vecenv sets this to the env's index; we spawn one game per index */
 
@@ -378,7 +389,8 @@ typedef struct {
     int dialog_frames;
     int deaths;           /* deaths this episode, which only respawn lets past one */
     double next_frame_time; /* for watching it at the speed a television would */
-} SM64;
+};
+typedef Env SM64;
 
 /* --- reading the game -------------------------------------------------------- */
 
@@ -1309,7 +1321,7 @@ static void sm64_write_picture(SM64* env, float* out) {
 }
 
 static void sm64_write_observations(SM64* env, float speed) {
-    float* obs = env->observations;
+    obs_t* obs = env->agents[0].observations;
     N64Gym* gym = &env->gym;
     uint32_t action = sm64_action(env);
 
@@ -1372,7 +1384,7 @@ static void sm64_write_observations(SM64* env, float speed) {
 }
 
 /* Required function */
-void c_reset(SM64* env) {
+void puf_reset(SM64* env) {
     if (!n64gym_load_state(&env->gym, sm64_state_path())) {
         fprintf(stderr, "sm64: could not put the game back: %s\n", env->gym.error);
         exit(1);
@@ -1487,24 +1499,25 @@ static void sm64_end_episode(SM64* env, int how) {
     env->log.ended_early += (float)(how == ENDED_EARLY);
     env->log.deaths += (float)env->deaths;
     env->log.n += 1.0f;
-    env->terminals[0] = 1.0f;
-    c_reset(env);
+    env->agents[0].terminals[0] = 1.0f;
+    puf_reset(env);
 }
 
 /* Required function */
-void c_step(SM64* env) {
-    env->rewards[0] = 0.0f;
-    env->terminals[0] = 0.0f;
+void puf_step(SM64* env) {
+    Agent* agent = &env->agents[0];
+    agent->rewards[0] = 0.0f;
+    agent->terminals[0] = 0.0f;
     env->steps++;
 
-    int direction = (int)env->actions[0];
+    int direction = (int)agent->actions[0];
     if (direction < 0 || direction > STICK_DIRECTIONS) {
         direction = 0;
     }
     uint16_t buttons = 0;
-    if ((int)env->actions[1] == 1) buttons |= BUTTON_A;
-    if ((int)env->actions[2] == 1) buttons |= BUTTON_B;
-    if ((int)env->actions[3] == 1) buttons |= BUTTON_Z;
+    if ((int)agent->actions[1] == 1) buttons |= BUTTON_A;
+    if ((int)agent->actions[2] == 1) buttons |= BUTTON_B;
+    if ((int)agent->actions[3] == 1) buttons |= BUTTON_Z;
 
     float stick_x, stick_y;
     sm64_aim(env, direction, &stick_x, &stick_y);
@@ -1524,8 +1537,8 @@ void c_step(SM64* env) {
      * it. The warp inside or the star's dance comes after, and is the same for
      * every run, so it is not counted. */
     if (sm64_goal_reached(env)) {
-        env->rewards[0] = DOOR_REWARD - step_cost;
-        env->episode_return += env->rewards[0];
+        agent->rewards[0] = DOOR_REWARD - step_cost;
+        env->episode_return += agent->rewards[0];
         sm64_fastest_offer(env);
         if (env->go_explore > 0.0f) {
             sm64_demo_offer(env);
@@ -1548,8 +1561,8 @@ void c_step(SM64* env) {
     if (sm64_level(env) != sm64_home_level(env) || n64_s16(&env->gym, env->mario + M_HEALTH) < 0x100) {
         if (env->respawn) {
             sm64_respawn(env);
-            env->rewards[0] = -step_cost;
-            env->episode_return += env->rewards[0];
+            agent->rewards[0] = -step_cost;
+            env->episode_return += agent->rewards[0];
             if (env->tick >= env->max_ticks) {
                 sm64_end_episode(env, ENDED_CLOCK);
                 return;
@@ -1558,8 +1571,8 @@ void c_step(SM64* env) {
             return;
         }
         int left = env->max_ticks - env->tick;
-        env->rewards[0] = -step_cost - env->time_penalty * (float)(left > 0 ? left : 0) / (float)env->max_ticks;
-        env->episode_return += env->rewards[0];
+        agent->rewards[0] = -step_cost - env->time_penalty * (float)(left > 0 ? left : 0) / (float)env->max_ticks;
+        env->episode_return += agent->rewards[0];
         env->deaths++;
         sm64_end_episode(env, ENDED_EARLY);
         return;
@@ -1583,8 +1596,8 @@ void c_step(SM64* env) {
         env->top_speed = speed;
     }
 
-    env->rewards[0] = -step_cost + sm64_novelty(env, x, sm64_pos(env, 1), z);
-    env->episode_return += env->rewards[0];
+    agent->rewards[0] = -step_cost + sm64_novelty(env, x, sm64_pos(env, 1), z);
+    env->episode_return += agent->rewards[0];
     env->closest = fminf(env->closest, sm64_goal_distance(env, x, z));
 
     if (env->tick >= env->max_ticks) {
@@ -1597,7 +1610,7 @@ void c_step(SM64* env) {
 /* Required function. The game draws itself in its own window when the env was
  * made with `window = 1`; all there is to do here is not run it faster than a
  * television would. */
-void c_render(SM64* env) {
+void puf_render(SM64* env) {
     if (!env->window) {
         return;
     }
@@ -1616,8 +1629,8 @@ void c_render(SM64* env) {
     }
 }
 
-/* Required function. Do not free observations, actions, rewards, terminals */
-void c_close(SM64* env) {
+/* Required function. Do not free the agent buffers: the vecenv owns them */
+void puf_close(SM64* env) {
     if (env->opened) {
         n64gym_close(&env->gym);
         env->opened = 0;
@@ -1626,6 +1639,56 @@ void c_close(SM64* env) {
     free(env->trail);
     env->trail = NULL;
     env->entered = NULL;
+}
+
+/* Required function: read this env's settings from [env] in its config, and start its game */
+void puf_init(Env* env, Dict* kwargs) {
+    env->num_agents = 1;
+    env->frameskip = (int)dict_get(kwargs, "frameskip");
+    env->max_ticks = (int)dict_get(kwargs, "max_ticks");
+    env->random_start = (int)dict_get(kwargs, "random_start");
+    env->time_penalty = (float)dict_get(kwargs, "time_penalty");
+    env->novelty = (float)dict_get(kwargs, "novelty");
+    env->novelty_episode = (float)dict_get(kwargs, "novelty_episode");
+    env->novelty_cell = (float)dict_get(kwargs, "novelty_cell");
+    env->respawn = (int)dict_get(kwargs, "respawn");
+    env->go_explore = (float)dict_get(kwargs, "go_explore");
+    env->go_explore_door = (float)dict_get(kwargs, "go_explore_door");
+    env->backward = (float)dict_get(kwargs, "backward");
+    env->backward_step = (int)dict_get(kwargs, "backward_step");
+    env->backward_rate = (float)dict_get(kwargs, "backward_rate");
+    env->window = (int)dict_get(kwargs, "window");
+    env->picture_width = (int)dict_get(kwargs, "picture_width");
+    env->picture_height = (int)dict_get(kwargs, "picture_height");
+    env->state = (int)dict_get(kwargs, "state");
+    sm64_obs_size = NUM_OBS + env->picture_width * env->picture_height * PICTURE_CHANNELS;
+    init(env);
+}
+
+/* Required function: the Log averaged over episodes, by name */
+void puf_log(Log* log, Dict* out) {
+    dict_set(out, "perf", log->perf);
+    dict_set(out, "score", log->score);
+    dict_set(out, "episode_return", log->episode_return);
+    dict_set(out, "episode_length", log->episode_length);
+    dict_set(out, "frames", log->frames);
+    dict_set(out, "closest", log->closest);
+    dict_set(out, "novelty", log->novelty);
+    dict_set(out, "cells", log->cells);
+    dict_set(out, "explored", log->explored);
+    dict_set(out, "from_start", log->from_start);
+    dict_set(out, "start_perf", log->start_perf);
+    dict_set(out, "archive", log->archive);
+    dict_set(out, "replayed", log->replayed);
+    dict_set(out, "door_cubes", log->door_cubes);
+    dict_set(out, "frontier", log->frontier);
+    dict_set(out, "distance", log->distance);
+    dict_set(out, "top_speed", log->top_speed);
+    dict_set(out, "forward_vel", log->forward_vel);
+    dict_set(out, "airborne", log->airborne);
+    dict_set(out, "dialog", log->dialog);
+    dict_set(out, "ended_early", log->ended_early);
+    dict_set(out, "deaths", log->deaths);
 }
 
 #endif

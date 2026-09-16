@@ -1,16 +1,15 @@
 #!/bin/bash
-# Build an env for PufferLib on Apple Silicon.
+# Build an env for PufferLib 5.0 on Apple Silicon.
 #
 #   ./build.sh [platformer|sm64]
 #
-#       vendor/PufferLib/pufferlib/_C*.so   the training backend, for this env
-#       build/platformer                    human play
-#       build/sm64_tool                     savestates, watching, benchmarking
+#       build/vecenv_<env>.dylib    the env in a vecenv, for mlx_pufferl.py to train on
+#       build/platformer            human play
+#       build/sm64_tool             savestates, watching, benchmarking
 #
-# PufferLib's own build.sh targets Linux/CUDA (-mavx2, gcc -fopenmp, nvcc) and
-# only finds envs under ocean/, so this mirrors its --cpu mode for macOS. One env
-# is compiled into the extension at a time, which is PufferLib's own shape:
-# building a different one replaces it.
+# PufferLib's own build.sh compiles an env from its ocean/ into the CUDA trainer,
+# which a Mac can't run, or into a CPU play binary. This compiles vecenv.c around
+# an env from envs/ into a library of its own instead, so envs build side by side.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -18,46 +17,32 @@ ENV=${1:-platformer}
 ENV_DIR=envs/$ENV
 PUFFER=vendor/PufferLib
 BUILD=build
-PYTHON=.venv/bin/python
 
 if [ ! -d "$ENV_DIR" ]; then
     echo "no env called $ENV in envs/" && exit 1
 fi
-if [ ! -f "$PUFFER/src/vecenv.h" ]; then
-    echo "PufferLib submodule missing: run 'git submodule update --init'" && exit 1
-fi
-if [ ! -x "$PYTHON" ]; then
-    echo "Python env missing: run 'uv sync'" && exit 1
+if [ ! -f "$PUFFER/src/pufferenv.h" ]; then
+    echo "PufferLib 5.0 submodule missing: run 'git submodule update --init'" && exit 1
 fi
 
 mkdir -p "$BUILD"
 
-# vecenv.h needs OpenMP, which Apple clang doesn't ship. Compile against Homebrew's
-# libomp headers but link torch's bundled runtime: two OpenMP runtimes in one process abort.
-OMP_INCLUDE="$(brew --prefix libomp)/include"
-if [ ! -f "$OMP_INCLUDE/omp.h" ]; then
-    echo "OpenMP headers missing: run 'brew install libomp'" && exit 1
+# pufferenv.h includes raylib for every env, as it does in PufferLib's own build
+RAYLIB=$BUILD/raylib-5.5_macos
+if [ ! -d "$RAYLIB" ]; then
+    echo "Downloading raylib..."
+    curl -sL https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_macos.tar.gz | tar xz -C "$BUILD"
 fi
-TORCH_LIB=$($PYTHON -c "import os, torch; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")
-PY_INCLUDE=$($PYTHON -c "import sysconfig; print(sysconfig.get_path('include'))")
-PYBIND_INCLUDE=$($PYTHON -c "import pybind11; print(pybind11.get_include())")
-EXT_SUFFIX=$($PYTHON -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+RAYLIB_LIBS=("$RAYLIB/lib/libraylib.a" -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL)
 
-# What this env needs beyond the binding itself.
-ENV_INCLUDES=(-I"$ENV_DIR")
-ENV_LIBS=()
-ENV_FRAMEWORKS=()
-
-if [ "$ENV" = platformer ]; then
-    RAYLIB=$BUILD/raylib-5.5_macos
-    if [ ! -d "$RAYLIB" ]; then
-        echo "Downloading raylib..."
-        curl -sL https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_macos.tar.gz | tar xz -C "$BUILD"
-    fi
-    ENV_INCLUDES+=(-DPLATFORM_DESKTOP -I"$RAYLIB/include")
-    ENV_LIBS+=("$RAYLIB/lib/libraylib.a")
-    ENV_FRAMEWORKS+=(-framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL)
+# The vecenv steps envs on OpenMP threads, which Apple clang doesn't ship
+OMP="$(brew --prefix libomp)"
+if [ ! -f "$OMP/include/omp.h" ]; then
+    echo "OpenMP missing: run 'brew install libomp'" && exit 1
 fi
+OMP_FLAGS=(-Xpreprocessor -fopenmp -I"$OMP/include" -L"$OMP/lib" -lomp -Wl,-rpath,"$OMP/lib")
+
+CFLAGS=(-O2 -Wall -DPLATFORM_DESKTOP -I"$PUFFER/src" -I"$RAYLIB/include" -I"$ENV_DIR")
 
 if [ "$ENV" = sm64 ]; then
     # The game is a real cartridge, statically recompiled by N64Bundler and run
@@ -125,54 +110,21 @@ for game in library.get("games", []):
 #define SM64_STAR_DEMO "$(pwd)/$BUILD/sm64/star.demo"
 #define SM64_LOG "$(pwd)/$BUILD/sm64/game.log"
 PATHS
-    ENV_INCLUDES+=(-I"$BUILD/sm64" -I"$N64BUNDLER/ModernReality/include/modernreality")
+    CFLAGS+=(-I"$BUILD/sm64" -I"$N64BUNDLER/ModernReality/include/modernreality")
 fi
 
 echo "Compiling the $ENV env..."
-clang -c -O2 -DNDEBUG -Wall -fPIC -fvisibility=hidden \
-    -Xpreprocessor -fopenmp -I"$OMP_INCLUDE" \
-    -I"$PUFFER/src" "${ENV_INCLUDES[@]}" \
-    "$ENV_DIR/binding.c" -o "$BUILD/binding.o"
-
-# Only depends on PufferLib's sources and the env's name, so skip it unless one changed
-BINDINGS_OBJ=$BUILD/bindings_cpu_$ENV.o
-if [ ! "$BINDINGS_OBJ" -nt "$PUFFER/src/bindings_cpu.cpp" ] || [ ! "$BINDINGS_OBJ" -nt "$PUFFER/src/vecenv.h" ]; then
-    echo "Compiling CPU training backend..."
-    clang++ -c -O2 -std=c++17 -fPIC -DPRECISION_FLOAT -DENV_NAME=$ENV \
-        -I"$PUFFER/src" -I"$PY_INCLUDE" -I"$PYBIND_INCLUDE" \
-        "$PUFFER/src/bindings_cpu.cpp" -o "$BINDINGS_OBJ"
-fi
-
-OUTPUT="$PUFFER/pufferlib/_C$EXT_SUFFIX"
-clang++ -shared "$BINDINGS_OBJ" "$BUILD/binding.o" \
-    ${ENV_LIBS[@]+"${ENV_LIBS[@]}"} ${ENV_FRAMEWORKS[@]+"${ENV_FRAMEWORKS[@]}"} \
-    -L"$TORCH_LIB" -lomp -Wl,-rpath,"$TORCH_LIB" \
-    -undefined dynamic_lookup -o "$OUTPUT"
-# torch's libomp.dylib carries a stale install name (/opt/llvm-openmp/...), so
-# point the extension at the copy torch loads, then re-sign after editing
-install_name_tool -change "$(otool -D "$TORCH_LIB/libomp.dylib" | tail -1)" @rpath/libomp.dylib "$OUTPUT" 2>/dev/null
-codesign -f -s - "$OUTPUT" 2>/dev/null
-echo "Built: $OUTPUT"
+clang -shared -fPIC -fvisibility=hidden "${CFLAGS[@]}" \
+    -DENV_HEADER="\"$ENV_DIR/$ENV.h\"" -DPUFFER_ENV_NAME="\"$ENV\"" \
+    vecenv.c "${RAYLIB_LIBS[@]}" "${OMP_FLAGS[@]}" -lm -o "$BUILD/vecenv_$ENV.dylib"
+echo "Built: $BUILD/vecenv_$ENV.dylib"
 
 if [ "$ENV" = platformer ]; then
-    clang -O2 -Wall "${ENV_INCLUDES[@]}" \
-        "$ENV_DIR/$ENV.c" "${ENV_LIBS[@]}" "${ENV_FRAMEWORKS[@]}" -lm -o "$BUILD/$ENV"
+    clang "${CFLAGS[@]}" "$ENV_DIR/$ENV.c" "${RAYLIB_LIBS[@]}" -lm -o "$BUILD/$ENV"
     echo "Built: $BUILD/$ENV"
 fi
 
 if [ "$ENV" = sm64 ]; then
-    # Homebrew's OpenMP rather than torch's, because nothing here loads torch:
-    # the tool is the env without the trainer, and torch's copy carries an
-    # install name that only resolves inside a process torch has already set up.
-    OMP_LIB="$(brew --prefix libomp)/lib"
-    clang -O2 -Wall -Xpreprocessor -fopenmp -I"$OMP_INCLUDE" "${ENV_INCLUDES[@]}" \
-        "$ENV_DIR/$ENV.c" -L"$OMP_LIB" -lomp -Wl,-rpath,"$OMP_LIB" -lm -o "$BUILD/sm64_tool"
+    clang "${CFLAGS[@]}" "$ENV_DIR/$ENV.c" "${OMP_FLAGS[@]}" -lm -o "$BUILD/sm64_tool"
     echo "Built: $BUILD/sm64_tool"
 fi
-
-# puffer's CLI only reads configs from inside the PufferLib checkout. Link ours in
-# and keep the link out of the submodule's git status.
-ln -sfn "../../../$ENV_DIR/$ENV.ini" "$PUFFER/config/$ENV.ini"
-EXCLUDE=$(git -C "$PUFFER" rev-parse --path-format=absolute --git-path info/exclude)
-mkdir -p "$(dirname "$EXCLUDE")"
-grep -qxF "config/$ENV.ini" "$EXCLUDE" 2>/dev/null || echo "config/$ENV.ini" >> "$EXCLUDE"

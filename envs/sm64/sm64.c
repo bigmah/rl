@@ -42,11 +42,13 @@ static SM64* make_env(int index, int window) {
      * as training with picture_width and picture_height does. */
     sscanf(sm64_setting("SM64_PICTURE", "0x0"), "%dx%d", &env->picture_width, &env->picture_height);
     env->rng = (unsigned)index;
-    env->observations =
-        (float*)calloc(NUM_OBS + env->picture_width * env->picture_height * PICTURE_CHANNELS, sizeof(float));
-    env->actions = (float*)calloc(ACTION_HEADS, sizeof(float));
-    env->rewards = (float*)calloc(1, sizeof(float));
-    env->terminals = (float*)calloc(1, sizeof(float));
+    env->agents[0] = (Agent){
+        .observations = (obs_t*)calloc(NUM_OBS + env->picture_width * env->picture_height * PICTURE_CHANNELS,
+                                       sizeof(obs_t)),
+        .actions = (float*)calloc(NUM_ATNS, sizeof(float)),
+        .rewards = (float*)calloc(1, sizeof(float)),
+        .terminals = (float*)calloc(1, sizeof(float)),
+    };
     init(env);
     return env;
 }
@@ -54,7 +56,7 @@ static SM64* make_env(int index, int window) {
 static void show(SM64* env, int step) {
     uint32_t action = sm64_action(env);
     printf("step %5d  reward %+6.4f  closest %6.0f  fwd %7.2f  pos (%8.1f %7.1f %8.1f)  action %08x%s\n",
-           step, env->rewards[0], env->closest, sm64_forward_vel(env), sm64_pos(env, 0),
+           step, env->agents[0].rewards[0], env->closest, sm64_forward_vel(env), sm64_pos(env, 0),
            sm64_pos(env, 1), sm64_pos(env, 2), action, (action & ACT_FLAG_AIR) ? "  (in the air)" : "");
 }
 
@@ -110,18 +112,19 @@ static int policy_named(const char* name) {
  * Door walks to the foot of the bridge, then to the door, and mashes A through
  * Lakitu: the slow way there, and proof that the door ends an episode. */
 static void simple_policy(SM64* env, int policy, int step) {
+    float* actions = env->agents[0].actions;
     if (policy == POLICY_RANDOM) {
-        env->actions[0] = (float)(rand() % (STICK_DIRECTIONS + 1));
-        env->actions[1] = (float)(rand() % 2);
-        env->actions[2] = (float)(rand() % 2);
-        env->actions[3] = (float)(rand() % 2);
+        actions[0] = (float)(rand() % (STICK_DIRECTIONS + 1));
+        actions[1] = (float)(rand() % 2);
+        actions[2] = (float)(rand() % 2);
+        actions[3] = (float)(rand() % 2);
         return;
     }
-    env->actions[2] = 0.0f;
-    env->actions[3] = 0.0f;
+    actions[2] = 0.0f;
+    actions[3] = 0.0f;
     if (policy == POLICY_FORWARD) {
-        env->actions[0] = 1.0f;                        /* straight ahead */
-        env->actions[1] = (step % 8 == 0) ? 1.0f : 0.0f; /* and a jump now and then */
+        actions[0] = 1.0f;                          /* straight ahead */
+        actions[1] = (step % 8 == 0) ? 1.0f : 0.0f; /* and a jump now and then */
         return;
     }
     float x = sm64_pos(env, 0);
@@ -129,26 +132,26 @@ static void simple_policy(SM64* env, int policy, int step) {
     float target_z = z > 100.0f ? 0.0f : DOOR_Z;
     int wanted = (int)lroundf(atan2f(DOOR_X - x, target_z - z) * (65536.0f / (2.0f * (float)M_PI)));
     int turn = (int)lroundf((float)(int16_t)(wanted - sm64_face_yaw(env)) / (65536.0f / STICK_DIRECTIONS));
-    env->actions[0] = (float)(1 + ((turn % STICK_DIRECTIONS) + STICK_DIRECTIONS) % STICK_DIRECTIONS);
+    actions[0] = (float)(1 + ((turn % STICK_DIRECTIONS) + STICK_DIRECTIONS) % STICK_DIRECTIONS);
     int talking = (sm64_action(env) & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE;
-    env->actions[1] = (talking && step % 2 == 0) ? 1.0f : 0.0f;
+    actions[1] = (talking && step % 2 == 0) ? 1.0f : 0.0f;
 }
 
 static int drive(int window, int policy, int steps, int quiet) {
     SM64* env = make_env(0, window);
-    c_reset(env);
+    puf_reset(env);
     double started = now();
     float total = 0.0f;
     int step = 0;
     for (; step < steps; step++) {
         simple_policy(env, policy, step);
-        c_step(env);
-        c_render(env);
-        total += env->rewards[0];
+        puf_step(env);
+        puf_render(env);
+        total += env->agents[0].rewards[0];
         if (!quiet && step % 30 == 0) {
             show(env, step);
         }
-        if (env->terminals[0] != 0.0f) {
+        if (env->agents[0].terminals[0] != 0.0f) {
             Log* log = &env->log;
             printf("episode over at step %d: %s after %.0f frames, return %.2f, %.0f%% of it in dialog\n",
                    step, log->perf > 0.0f ? "opened the door" : "door still shut",
@@ -164,7 +167,7 @@ static int drive(int window, int policy, int steps, int quiet) {
     double elapsed = now() - started;
     printf("%d steps in %.2fs (%.0f steps/s, %.0f game frames/s), reward since the last episode %.1f\n",
            step, elapsed, step / elapsed, step * env->frameskip / elapsed, total);
-    c_close(env);
+    puf_close(env);
     return 0;
 }
 
@@ -174,7 +177,7 @@ static int bench(int games, int steps) {
     SM64** envs = (SM64**)calloc((size_t)games, sizeof(SM64*));
     for (int i = 0; i < games; i++) {
         envs[i] = make_env(i, 0);
-        c_reset(envs[i]);
+        puf_reset(envs[i]);
     }
     printf("all up in %.1fs; stepping\n", now() - started);
 
@@ -183,14 +186,14 @@ static int bench(int games, int steps) {
 #pragma omp parallel for schedule(static) num_threads(games)
         for (int i = 0; i < games; i++) {
             simple_policy(envs[i], POLICY_RANDOM, step);
-            c_step(envs[i]);
+            puf_step(envs[i]);
         }
     }
     double elapsed = now() - started;
     printf("%d games x %d steps in %.2fs: %.0f agent steps/s, %.0f game frames/s\n", games, steps,
            elapsed, games * steps / elapsed, games * steps * envs[0]->frameskip / elapsed);
     for (int i = 0; i < games; i++) {
-        c_close(envs[i]);
+        puf_close(envs[i]);
     }
     return 0;
 }
@@ -213,13 +216,14 @@ static int bench(int games, int steps) {
 #define EXPLORE_TICKS 900
 
 static void explore_policy(SM64* env) {
+    float* actions = env->agents[0].actions;
     if (rand_r(&env->seed) % 10 == 0) {
-        env->actions[0] = (float)(rand_r(&env->seed) % (STICK_DIRECTIONS + 1));
+        actions[0] = (float)(rand_r(&env->seed) % (STICK_DIRECTIONS + 1));
     }
-    env->actions[1] = (float)(rand_r(&env->seed) % 2);
+    actions[1] = (float)(rand_r(&env->seed) % 2);
     for (int head = 2; head < ACTION_HEADS; head++) {
         if (rand_r(&env->seed) % 10 == 0) {
-            env->actions[head] = (float)(rand_r(&env->seed) % 2);
+            actions[head] = (float)(rand_r(&env->seed) % 2);
         }
     }
 }
@@ -252,12 +256,12 @@ static int explore(int games, double seconds, int ticks) {
     #pragma omp parallel num_threads(games)
     {
         SM64* env = envs[omp_get_thread_num()];
-        c_reset(env);
+        puf_reset(env);
         double next_report = started + 10.0;
         int talking = 0;
         while (now() < started + seconds) {
             explore_policy(env);
-            c_step(env);
+            puf_step(env);
             /* The trail is every input since the savestate, so it is a way back to
              * here. Checked again under the lock, since every game is racing for it. */
             float away = sm64_goal_distance(env, sm64_pos(env, 0), sm64_pos(env, 2));
@@ -271,12 +275,13 @@ static int explore(int games, double seconds, int ticks) {
                     nearest_frames = env->trail_frames;
                 }
             }
-            int now_talking = env->terminals[0] == 0.0f && (sm64_action(env) & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE;
-            if (talking && !now_talking && env->terminals[0] == 0.0f) {
+            int ended = env->agents[0].terminals[0] != 0.0f;
+            int now_talking = !ended && (sm64_action(env) & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE;
+            if (talking && !now_talking && !ended) {
                 __sync_add_and_fetch(&speeches, 1);
             }
             talking = now_talking;
-            if (env->terminals[0] != 0.0f) {
+            if (ended) {
                 __sync_add_and_fetch(&episodes, 1);
                 __sync_add_and_fetch(&doors, (unsigned)env->log.perf);
                 memset(&env->log, 0, sizeof(env->log));
@@ -304,7 +309,7 @@ static int explore(int games, double seconds, int ticks) {
     }
     free(nearest);
     for (int i = 0; i < games; i++) {
-        c_close(envs[i]);
+        puf_close(envs[i]);
     }
     return doors > 0 ? 0 : 1;
 }
@@ -334,7 +339,7 @@ static int replay(int window, const char* path) {
             return 1;
         }
         frame += inputs[k].frames;
-        c_render(env);
+        puf_render(env);
         /* In a window it is being watched, so it is played at the speed a
          * console ran it rather than the three times that it replays at. */
         if (window) {
@@ -363,7 +368,7 @@ static int replay(int window, const char* path) {
                sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2),
                sm64_goal_distance(env, sm64_pos(env, 0), sm64_pos(env, 2)));
     }
-    c_close(env);
+    puf_close(env);
     free(inputs);
     return opened == frames ? 0 : 1;
 }

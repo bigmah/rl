@@ -1,7 +1,7 @@
-.PHONY: setup build play train eval sm64 sm64-state sm64-watch sm64-bench sm64-probe sm64-explore sm64-robustify sm64-slide sm64-picture
+.PHONY: setup build play train eval sm64 sm64-state sm64-train sm64-watch sm64-demo sm64-bench sm64-explore sm64-robustify sm64-slide sm64-picture
 
-# Which env is built into PufferLib's extension. One at a time, which is
-# PufferLib's own shape: make ENV=sm64 train builds sm64 and trains it.
+# Which env to build and train. Each builds into a library of its own
+# (build/vecenv_<env>.dylib), so building one leaves the others as they are.
 ENV ?= platformer
 
 # One-time: fetch the PufferLib submodule and Python deps
@@ -20,9 +20,9 @@ play: build
 train: build
 	uv run python mlx_pufferl.py train $(ENV) $(ARGS)
 
-# Watch the most recent checkpoint play (ESC to quit)
+# Watch the most trained checkpoint play one env (ESC to quit)
 eval: build
-	uv run python mlx_pufferl.py eval $(ENV) --load-model-path latest --vec.total-agents 1 $(ARGS)
+	uv run python mlx_pufferl.py eval $(ENV) latest $(ARGS)
 
 # --- Super Mario 64 ----------------------------------------------------------
 # The game itself comes from N64Bundler: drop your own sm64.z64 on it once so it
@@ -67,10 +67,9 @@ sm64-slide: sm64
 sm64-picture: sm64
 	uv run python mlx_pufferl.py train sm64 --env.picture-width 80 --env.picture-height 60 $(ARGS)
 
-# Watch the most recent checkpoint play, in a window, at the speed a console ran
+# Watch the most trained checkpoint play, in a window, at the speed a console ran
 sm64-watch: sm64
-	uv run python mlx_pufferl.py eval sm64 --load-model-path latest \
-		--vec.total-agents 1 --env.window 1 --env.go-explore 0 $(ARGS)
+	uv run python mlx_pufferl.py eval sm64 latest --env.window 1 --env.go-explore 0 $(ARGS)
 
 # The game with no policy at all: hold forward and jump, in a window
 sm64-demo: sm64

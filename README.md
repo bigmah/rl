@@ -1,17 +1,16 @@
 # rl
 
-RL experiments with [PufferLib](https://github.com/PufferAI/PufferLib) 4.0, vendored as a git submodule at `vendor/PufferLib` (branch `4.0`).
+RL experiments with [PufferLib](https://github.com/PufferAI/PufferLib) 5.0, vendored as a git submodule at `vendor/PufferLib` (branch `5.0`).
 
-Two envs live here. `make ENV=<name> train` builds one into PufferLib's extension and trains it; PufferLib compiles one env at a time, so building another replaces it.
+Two envs live here, written as PufferLib 5.0 C envs. `make ENV=<name> train` builds one into a vecenv library of its own and trains it on the Mac's GPU with `mlx_pufferl.py`, a port of PufferLib's CUDA trainer to MLX.
 
 ## Platformer
 
 `envs/platformer/` is a single-level 2D platformer written as a PufferLib C env: run right, clear the pits and spikes, touch the flag.
 
-- `platformer.h`: level, physics, observations, rewards, rendering
+- `platformer.h`: level, physics, observations, rewards, rendering, and the `puf_*` functions PufferLib calls
 - `platformer.c`: human play
-- `binding.c`: PufferLib vec-env binding
-- `platformer.ini`: env and training config
+- `platformer.ini`: env and training config, on top of PufferLib's `config/default.ini`
 
 Rewards: progress toward the flag (1.0 for the whole run), +1 for the flag, and -0.1 for dying or running out of time. Episodes end at the flag, on death, or after 30 s. Keep the failure penalty small: at -0.5, early deaths taught some seeds to stand still.
 
@@ -21,10 +20,10 @@ Rewards: progress toward the flag (1.0 for the whole run), +1 for the flag, and 
 
 The game is not emulated and not reimplemented. [N64Bundler](https://github.com/bigmah/n64bundler) statically recompiles `sm64.z64` into native arm64 and runs it in `n64b-run`; this env starts one of those per agent, in a process of its own, and reads Mario out of the console's memory — which is mapped into both processes, so an observation is a load rather than a request.
 
-- `sm64.h`: where the game keeps Mario, what an action does to the controller, the reward
+- `sm64.h`: where the game keeps Mario, what an action does to the controller, the reward, and the `puf_*` functions PufferLib calls
 - `n64b_gym.h`: starting a game, stepping it, saving and loading its state
 - `sm64.c`: the env without the trainer — make the savestate, watch it, benchmark it, explore without a policy, replay the demo
-- `sm64.ini`: env and training config
+- `sm64.ini`: env and training config, on top of PufferLib's `config/default.ini`
 
 ```sh
 make sm64-state       # play through the intro once and save the castle grounds
@@ -41,6 +40,8 @@ make sm64-slide       # a different goal: the star at the bottom of Peach's Secr
 ```
 
 It needs your own dump of the cartridge, recompiled once: drop `sm64.z64` on N64Bundler so it appears in its library as `NSME`. `build.sh` finds the recompiled game there. Set `N64BUNDLER` if that checkout is not at `../static_recomp/n64bundler`. No game data is copied into this repository, and everything derived from it lands in the gitignored `build/`.
+
+Every training result in the sections below came from the PufferLib 4.0 trainer, and `sm64.ini` is still tuned for it. 5.0 trains differently enough that those settings learn far more slowly: see *Training on the Mac GPU with MLX*.
 
 ### Measuring Mario's speed
 
@@ -299,25 +300,55 @@ Each game keeps more than a core busy — its own threads, and the renderer's �
 
 ## Training on the Mac GPU with MLX
 
-`mlx_pufferl.py` ports PufferLib's CUDA trainer to [MLX](https://github.com/ml-explore/mlx), so training runs on the Apple Silicon GPU. It uses PufferLib's regular policy and PPO variant:
-- **Policy:** Linear encoder, then a 4-layer MinGRU (hidden size 128), then a Linear decoder. For an env whose config names a `picture_width` and `picture_height`, the last `width × height × 3` observation values are a picture, and three convolutions go in front of the encoder.
-- **PPO:** V-trace-clipped advantages, prioritized minibatches and the Muon optimizer.
+PufferLib 5.0 trains with one CUDA program (`src/pufferl.cu` and `src/algo.cu`), which a Mac can't run. `mlx_pufferl.py` is that trainer in [MLX](https://github.com/ml-explore/mlx), so training runs on the Apple Silicon GPU:
+- **Policy:** PufferLib's default. A bias-free Linear encoder, a 4-layer MinGRU (hidden size 128), and one decoder matrix whose last row is the value head. For an env whose config names a `picture_width` and `picture_height`, the last `width × height × 3` observation values are a picture, and three convolutions go in front of the encoder.
+- **PPO as 5.0 has it:** each minibatch computes its advantages from its own values before the update (GAE, or V-trace with `vtrace = 1`) and doesn't normalize them. Minibatches are whole agent rows taken in order, with no prioritized replay. The MinGRU's state carries over from one horizon to the next and is cleared where an episode ends, both when acting and when training.
+- **Muon**, on the clipped gradient.
+- **The MinGRU's pass over a segment is a Metal kernel**, as it is a CUDA kernel in 5.0: a GPU thread per unit steps through time, and a second kernel does the backward pass. It is four times faster than the same thing as MLX ops, and matches them to 1e-6.
 
-It follows `pufferlib/torch_pufferl.py` but matches the CUDA kernels where the two differ:
-- bias-free layers
-- one decoder matrix whose last row is the value head
-- √2 encoder init
-- the CUDA advantage formula
-- entropy-coefficient annealing
+`vecenv.c` is 5.0's CPU vecenv without the CUDA around it. `build.sh` compiles it around an env into `build/vecenv_<env>.dylib`, and the trainer drives that through ctypes: the env steps on CPU threads, the policy on the GPU.
 
-It installs itself as PufferLib's backend, so PufferLib's CLI, configs, dashboard, checkpoints and eval loop all work unchanged:
+Configs and flags work as they do in 5.0: `vendor/PufferLib/config/default.ini`, then `envs/<env>/<env>.ini`, then `--section.key=value` flags, where a space works as well as `=`. Only keys a config already has can be set.
 
 ```sh
 uv run python mlx_pufferl.py train platformer [--train.total-timesteps 20_000_000 ...]
-uv run python mlx_pufferl.py eval platformer --load-model-path latest --vec.total-agents 1
+uv run python mlx_pufferl.py eval platformer [latest | path/to/checkpoint.bin] [--headless]
 ```
 
-The env still steps on the CPU (C with OpenMP). Advantages and minibatch sampling run in numpy; the policy and PPO updates run on the GPU. Limits: only the default MinGRU policy (with or without the picture encoder) and discrete actions are implemented. Checkpoints hold MLX weights (numpy `.npz` data under puffer's `.bin` names), so PufferLib's torch and CUDA backends can't load them.
+Training writes checkpoints to `checkpoints/<env>/<run_id>/` and, at the end, `logs/<env>/<run_id>.ini`: the config and a downsampled `[metrics]` section. With `eval_episodes` above 0, it finishes by playing the final policy in fresh episodes until that many have ended. `eval` shows one env in a window, or with `--headless` plays `eval_episodes` episodes and prints the score. `latest` is the env's most trained checkpoint.
+
+Checkpoints are in 5.0's format: flat float32 weights, in the CUDA trainer's order and alignment. PufferLib's own CPU eval (`src/puffercpu.c`, built around `platformer.h`) loads every weight of a platformer checkpoint from here and reaches the flag in 300 of 300 episodes. Checkpoints from the 4.0 port (numpy `.npz` data under the same `.bin` names) still load.
+
+Not ported: continuous actions, action masks, multiple GPUs, self-play and sweeps. Rollouts are always synchronous: 5.0's default `async = 1` collects the next rollout with a one-epoch-stale copy of the policy while the learner trains, and this ignores it.
+
+Found along the way: in MLX 0.32.2 the gradient of step slices like `x[0::2]` and `x[1::2]` is wrong when a slice is one element long. `linear_scan` reshapes instead.
+
+### Against the 4.0 port
+
+On an M4 Pro. Platformer, 10M steps, perf the fraction of episodes reaching the flag:
+
+| | 4.0 | 5.0 |
+|---|---|---|
+| steps/s while training | 550K | 810K |
+| perf at about 4M steps | 0.98 | 0.98 |
+| perf at about 9M steps | 0.998 | 0.993–0.998 |
+
+That needed two config changes, both back to 5.0's defaults:
+- **`ent_coef`**: without normalized advantages, platformer's old 0.01 outweighed its advantages. Entropy stayed at 2.1 and perf was 0.92 at 10M steps. At 5.0's 0.001 it learns as fast as 4.0 did.
+- **`eval_episodes`**: 5.0's eval restarts every env and counts the first episodes to end. Those skew toward early deaths, so with 1,024 agents, 100 episodes read 0.77 for a policy at 0.93. 5.0's default of 10,000 doesn't skew.
+
+**sm64 has not been retuned for 5.0.** With 8 games, the 4.0 trainer and 5.0 run at the same speed, 3,500–4,200 steps a second, but `sm64.ini` learns far more slowly on 5.0. Entropy after 150K steps, with 2.5 as the target (4.9 is uniform):
+
+| | entropy |
+|---|---|
+| 4.0 | 1.8 |
+| 5.0, `sm64.ini` as it is | 4.1, still, at 300K steps |
+| 5.0, `vf_coef` 0.5 or 0.1 | 4.3–4.4 |
+| 5.0, fixed `ent_coef` 0.001 | 3.9 |
+| 5.0, fixed `ent_coef` 0.001 and `vf_coef` 0.1 | 3.3 |
+| 5.0 with advantages normalized as 4.0 did, and nothing else changed | 1.8 |
+
+So the change that matters for sm64 is advantage normalization. Its rewards are small, and Muon's update is the same size whatever the gradient, so without normalization the policy term barely steers it.
 
 ## Setup (macOS, Apple Silicon)
 
@@ -331,13 +362,13 @@ make setup   # git submodule update --init && uv sync
 ```sh
 make play    # A/D move, W/Space jump, S drop through platforms, R restart, ESC quit
 make train   # MLX on the GPU; checkpoints go to checkpoints/platformer/
-make eval    # watch the latest checkpoint
+make eval    # watch the most trained checkpoint
 ```
 
-Pass extra `puffer` flags with `ARGS`, e.g. `make train ARGS="--train.total-timesteps 10_000_000"`, and pick the env with `ENV=sm64`.
+Pass extra flags with `ARGS`, e.g. `make train ARGS="--train.total-timesteps 10_000_000"`, and pick the env with `ENV=sm64`.
 
 ## Mac build notes
 
-- `build.sh` stands in for PufferLib's Linux/CUDA build script. It compiles against Homebrew's OpenMP headers and links torch's bundled `libomp`, because two OpenMP runtimes in one process abort. The standalone `sm64_tool` links Homebrew's copy instead, since nothing in it loads torch.
-- `puffer` only reads configs from inside the PufferLib checkout, so `build.sh` symlinks the env's `.ini` into `vendor/PufferLib/config/`. The link is excluded from the submodule's git status.
-- The sm64 env gives each game one OpenMP thread rather than one per core: a thread stepping a game spends its time waiting on a socket, so the usual rule would run the games one after another.
+- `build.sh` stands in for PufferLib's build script, which compiles an env from its `ocean/` into the CUDA trainer or a CPU play binary. This compiles `vecenv.c` around an env from `envs/` into a library of its own instead, so envs build side by side. It links Homebrew's OpenMP, and raylib, which 5.0's `pufferenv.h` includes for every env.
+- Configs stay beside their envs: `mlx_pufferl.py` reads `envs/<env>/<env>.ini` itself, over PufferLib's `default.ini`.
+- The sm64 vecenv should step each game on a thread of its own, which is `num_threads` equal to `total_agents` in `sm64.ini`. A thread stepping a game spends its time waiting on a socket, so the usual rule of one thread per core would run the games one after another.

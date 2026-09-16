@@ -4,30 +4,32 @@
 
 int main(void) {
     Platformer env = {.frameskip = 1, .max_ticks = 120 * 60};
-    env.observations = (float*)calloc(NUM_OBS, sizeof(float));
-    env.actions = (float*)calloc(2, sizeof(float));
-    env.rewards = (float*)calloc(1, sizeof(float));
-    env.terminals = (float*)calloc(1, sizeof(float));
+    obs_t observations[OBS_SIZE] = {0};
+    float actions[NUM_ATNS] = {0};
+    float rewards[1] = {0};
+    float terminals[1] = {0};
+    env.agents[0] = (Agent){
+        .observations = observations,
+        .actions = actions,
+        .rewards = rewards,
+        .terminals = terminals,
+    };
 
     init(&env);
-    c_reset(&env);
-    c_render(&env);
+    puf_reset(&env);
+    puf_render(&env);
     while (!WindowShouldClose()) {
         int left = IsKeyDown(KEY_A);
         int right = IsKeyDown(KEY_D);
-        env.actions[0] = left == right ? 0 : left ? 1 : 2;
-        env.actions[1] = (IsKeyDown(KEY_W) || IsKeyDown(KEY_SPACE)) ? 1 : IsKeyDown(KEY_S) ? 2 : 0;
+        actions[0] = left == right ? 0 : left ? 1 : 2;
+        actions[1] = (IsKeyDown(KEY_W) || IsKeyDown(KEY_SPACE)) ? 1 : IsKeyDown(KEY_S) ? 2 : 0;
         if (IsKeyPressed(KEY_R)) {
-            c_reset(&env);
+            puf_reset(&env);
         }
-        c_step(&env);
-        c_render(&env);
+        puf_step(&env);
+        puf_render(&env);
     }
 
-    c_close(&env);
-    free(env.observations);
-    free(env.actions);
-    free(env.rewards);
-    free(env.terminals);
+    puf_close(&env);
     return 0;
 }

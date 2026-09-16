@@ -1,15 +1,12 @@
 [project]
 name = "rl"
 version = "0.1.0"
-description = "PufferLib experiments: a 2D platformer env trained with PuffeRL"
+description = "PufferLib 5.0 experiments: C envs trained with an MLX port of its trainer"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "mlx>=0.32.2",
-    "pufferlib",
+    "numpy",
 ]
 
 [tool.uv]
 package = false
-
-[tool.uv.sources]
-pufferlib = { path = "vendor/PufferLib", editable = true }
