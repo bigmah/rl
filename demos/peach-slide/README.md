@@ -23,8 +23,8 @@ scaled by whole pixels. It plays anywhere; nothing below is needed to watch it.
 `star-786-touch.demo` goes all the way: the same route to the box, the hundred
 frames frozen while the star comes out, and then a jump to it, with the star
 his on frame 786, 26.2 seconds from the savestate. `star-786-touch.mp4` is its
-video, with the star dance after, and `route-786-touch.txt` its trace. This is
-the fastest touch on record, found on 2026-09-17 by an hour of the backward
+video, with the star dance after, and `route-786-touch.txt` its trace. It was
+the fastest touch on record until the 770 below, found on 2026-09-17 by an hour of the backward
 algorithm along the 648 run: episodes began at savestates ten, twenty, up to
 sixty frames before the box, with only the star and the clock paying, and the
 first touch from any of them became the demo. All nine of its 786-frame touches
@@ -33,7 +33,32 @@ up the slide and no further in 15M steps. The 648 is 138 frames shorter only
 because it stops at the spawn: about a hundred of those frames are the freeze,
 which no run can shorten, and the rest the jump to where the star lands.
 
-Everything below applies to it the same way, with its file name in place of
+## The touch: 770 frames
+
+`star-770-touch.demo` is the fastest touch on record: the star is his on frame
+770, 25.7 seconds from the savestate. `star-770-touch.mp4` is its video and
+`route-770-touch.txt` its trace. It was found later on 2026-09-17, fifteen
+minutes into thirty of `make sm64-slide` with the touch as the reward, the same
+changes from the target as under "How it was found" below but 7M steps, and
+`load_model_path` the checkpoint the 786 came from. The archive starts empty in
+every run, so nothing of the 786 was handed to it: this is a run put together
+from the top of the slide within the half hour.
+
+It is not the 786 with a better ending. It is thirty frames slower over the top
+(sliding at frame 120, where the 786 is by 90) and slower down the upper track,
+and it wins all of that back and more at the jump: it leaves the upper track
+later, between frames 300 and 330, and flies forward at 85 to 95 units a frame instead
+of meeting a wall and dropping straight down, so it lands further along the
+lower track and is in the box by about frame 632, where the 786 took 648. The
+786's top with this jump would be a touch of about 740, which no run has put
+together yet.
+
+The same run found touches of 776, 778, 780 and 780; they are in
+`build/sm64/star-level27-act0-touch-fastest/`. Like every star before them, all
+of its touches began from an archive start partway down: of about 4,600
+episodes that began at the top of the slide, none touched the star.
+
+Everything below applies to these the same way, with the file name in place of
 `star-648.demo`.
 
 ## Playing it
