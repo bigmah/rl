@@ -715,7 +715,12 @@ class PuffeRL:
             gap = target_entropy - entropy_sum / num_minibatches
             self.log_ent_coef = min(max(self.log_ent_coef + c.get('ent_coef_rate', 0.01) * gap,
                 math.log(1e-4)), math.log(0.5))
-            self.ent_coef = math.exp(self.log_ent_coef)
+            # That sum alone overshoots where entropy answers the coefficient late: it keeps
+            # climbing until entropy has crossed the target, and by then is far past what holds
+            # it there. ent_coef_damping adds the gap itself, a factor of e for every
+            # 1 / ent_coef_damping of entropy off target, which is gone the moment the gap is.
+            damped = self.log_ent_coef + c.get('ent_coef_damping', 0.0) * gap
+            self.ent_coef = math.exp(min(max(damped, math.log(1e-4)), math.log(0.5)))
         self.epoch += 1
 
         end = time.perf_counter()

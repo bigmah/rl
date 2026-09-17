@@ -35,7 +35,7 @@ which no run can shorten, and the rest the jump to where the star lands.
 
 ## The touch: 770 frames
 
-`star-770-touch.demo` is the fastest touch on record: the star is his on frame
+`star-770-touch.demo` was the fastest touch on record until the 768 below: the star is his on frame
 770, 25.7 seconds from the savestate. `star-770-touch.mp4` is its video and
 `route-770-touch.txt` its trace. It was found later on 2026-09-17, fifteen
 minutes into thirty of `make sm64-slide` with the touch as the reward, the same
@@ -50,13 +50,58 @@ and it wins all of that back and more at the jump: it leaves the upper track
 later, between frames 300 and 330, and flies forward at 85 to 95 units a frame instead
 of meeting a wall and dropping straight down, so it lands further along the
 lower track and is in the box by about frame 632, where the 786 took 648. The
-786's top with this jump would be a touch of about 740, which no run has put
+786's top with this jump would be a touch of about 720, which no run has put
 together yet.
 
 The same run found touches of 776, 778, 780 and 780; they are in
 `build/sm64/star-level27-act0-touch-fastest/`. Like every star before them, all
 of its touches began from an archive start partway down: of about 4,600
 episodes that began at the top of the slide, none touched the star.
+
+## The touch: 768 frames
+
+`star-768-touch.demo` was the fastest touch on record until the 750 below, with `route-768-touch.txt`
+its trace and no video, because it is the 770 to the eye: the same inputs to
+frame 450, then a tighter line through the last two turns that has him in the
+box four frames sooner, and two of those given back on the way to the star. It
+came 23 minutes into an hour of `make sm64-slide` that began with the archive
+seeded from the runs on file (`--env.go-explore-seed 1`, see the top-level
+README), which touched the star in one episode in ten where the run before did
+in one in seventy, and still moved the record two frames.
+
+The run it was after is the 786's top with the 770's jump, about 720 frames: the
+786 is fifty frames ahead where the 770 leaves the upper track. It did not come,
+and not for want of tries. Started on the 786 a second before its jump, the
+hour's last checkpoint played 3,400 episodes with no training: 50 touches, none
+under 784, and one and a half deaths an episode. It does jump from there. It
+does not land.
+
+## The touch: 750 frames
+
+`star-750-touch.demo` is the fastest touch on record: the star is his on frame
+750, 25.0 seconds from the savestate. `star-750-touch.mp4` is its video and
+`route-750-touch.txt` its trace. It came 40 minutes into an hour of
+`make sm64-slide` with the archive seeded from the runs on file and the ghost
+paying (`--env.go-explore-seed 1 --env.ghost 0.02`, see the top-level README):
+the first time in an episode Mario enters a cube on a way to the star sooner
+than the archive's way into it, on the ground, he is paid 0.02 a frame of the
+difference, 0.1 at most, and the archive then keeps his way, so only a faster
+run is ever paid.
+
+It is the splice the seeded hour was after, and then some. Its first 142 frames
+are the 786's inputs exactly -- one of the ten runs seeded carried that top --
+and it holds the cap down the upper track, where the 770 dropped to 70 and 85.
+It leaves the upper track at about frame 260, where the 770 does, but on a
+shorter flight that lands at frame 360, where the 786's ground pound lands at
+385 and the 770's long flight at 412. It lands higher up the lower track than
+the 770, so it is in the box at about the same frame, 630. The rest is the
+ending: it takes the star 18 frames after the freeze, where the 770 took 30.
+
+The same hour touched the star in a fifth of its episodes by the end, and left
+the fastest folder all 750 to 764: every run in it under the 768 it began with.
+The 770's long flight from this top, landing at 412 two turns further down,
+would be in the box near 580 and worth another forty frames or so. Still none
+from the top of the slide.
 
 Everything below applies to these the same way, with the file name in place of
 `star-648.demo`.

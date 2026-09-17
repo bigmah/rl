@@ -1,0 +1,27 @@
+demos/peach-slide/star-750-touch.demo: 375 inputs, 750 frames
+  frame   30  pos (  5138.2  6144.0  -5609.6)  fwd   29.04  action 04000471
+  frame   60  pos (  3870.5  6181.8  -5666.0)  fwd   48.07  action 0188088a  (in the air)
+  frame   90  pos (  2309.5  5967.7  -5680.8)  fwd   73.28  action 00840452
+  frame  120  pos (  -321.5  5358.7  -5169.0)  fwd  101.87  action 00840452
+  frame  150  pos ( -3119.0  4712.7  -5400.0)  fwd  101.80  action 00840452
+  frame  180  pos ( -5660.6  4156.2  -4093.4)  fwd  101.56  action 00840452
+  frame  210  pos ( -6449.9  3767.4  -1238.4)  fwd  100.77  action 00840452
+  frame  240  pos ( -5109.8  3256.2   1305.6)  fwd  100.80  action 00840452
+  frame  270  pos ( -2316.9  3058.0   1689.4)  fwd   80.16  action 03000880  (in the air)
+  frame  300  pos (  -355.5  2847.3   1102.0)  fwd   49.35  action 03000880  (in the air)
+  frame  330  pos (   652.1   605.2    664.4)  fwd   46.71  action 0188088a  (in the air)
+  frame  360  pos (  1604.3 -1379.2    484.0)  fwd   37.87  action 00880456
+  frame  390  pos (  1897.2 -1552.9  -1111.2)  fwd   61.61  action 00880456
+  frame  420  pos (  1500.0 -2076.2  -3855.1)  fwd  101.16  action 00880456
+  frame  450  pos (   426.7 -2446.9  -6465.0)  fwd   99.02  action 00880456
+  frame  480  pos ( -1460.7 -2929.6  -4779.1)  fwd   99.41  action 00880456
+  frame  510  pos ( -3526.2 -3464.9  -3531.8)  fwd   91.46  action 00880456
+  frame  540  pos ( -6169.3 -3705.8  -3926.9)  fwd   91.97  action 00880456
+  frame  570  pos ( -6732.9 -4099.5  -1085.9)  fwd   98.90  action 00880456
+  frame  600  pos ( -6819.0 -4371.6   1794.7)  fwd   99.00  action 00880456
+  frame  630  pos ( -6648.0 -4502.6   3182.1)  fwd  100.90  action 00880456
+  frame  660  pos ( -6648.0 -4502.6   3182.1)  fwd  100.90  action 00880456
+  frame  690  pos ( -6648.0 -4502.6   3182.1)  fwd  100.90  action 00880456
+  frame  720  pos ( -6648.0 -4502.6   3182.1)  fwd  100.90  action 00880456
+  frame  750  pos ( -6385.3 -4466.2   4830.0)  fwd    0.00  action 00001904  (in the air)
+the star at frame 750, as it should be

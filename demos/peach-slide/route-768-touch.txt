@@ -1,0 +1,27 @@
+demos/peach-slide/star-768-touch.demo: 384 inputs, 768 frames
+  frame   30  pos (  5573.9  6144.0  -5626.7)  fwd   10.68  action 04000440
+  frame   60  pos (  5057.1  6144.0  -5629.8)  fwd   29.21  action 04000471
+  frame   90  pos (  3846.7  6284.4  -5507.8)  fwd   45.95  action 0188088a  (in the air)
+  frame  120  pos (  2476.8  6006.4  -5366.9)  fwd   58.85  action 00840452
+  frame  150  pos (   320.0  5507.1  -5169.0)  fwd   95.45  action 00840452
+  frame  180  pos ( -2145.5  4936.9  -5413.6)  fwd   84.83  action 00840452
+  frame  210  pos ( -4804.1  4374.5  -4913.0)  fwd  100.79  action 00840452
+  frame  240  pos ( -5811.9  3917.2  -2488.1)  fwd   86.50  action 00840452
+  frame  270  pos ( -5905.3  3617.2   -261.0)  fwd   69.89  action 00840452
+  frame  300  pos ( -4572.2  3127.9   1566.0)  fwd   97.29  action 00840452
+  frame  330  pos ( -1875.9  2998.9   1663.3)  fwd   83.35  action 03000880  (in the air)
+  frame  360  pos (   693.0  2329.8   1134.2)  fwd   95.02  action 0300088e  (in the air)
+  frame  390  pos (  1574.2   134.8  -1055.3)  fwd   71.69  action 0100088c  (in the air)
+  frame  420  pos (  1819.7 -1929.7  -2657.6)  fwd   49.77  action 00880456
+  frame  450  pos (  1467.7 -2171.8  -4576.6)  fwd   82.60  action 00880456
+  frame  480  pos (  -169.0 -2506.9  -6571.0)  fwd  100.58  action 00880456
+  frame  510  pos ( -1729.1 -3029.4  -4339.1)  fwd  100.72  action 00880456
+  frame  540  pos ( -4476.8 -3617.8  -3830.5)  fwd  100.57  action 00880456
+  frame  570  pos ( -6524.3 -4000.2  -2024.4)  fwd  100.58  action 00880456
+  frame  600  pos ( -6582.0 -4290.1    932.0)  fwd   99.76  action 00880456
+  frame  630  pos ( -5995.6 -4500.1   3155.1)  fwd   79.47  action 00880456
+  frame  660  pos ( -5995.6 -4500.1   3155.1)  fwd   79.47  action 00880456
+  frame  690  pos ( -5995.6 -4500.1   3155.1)  fwd   79.47  action 00880456
+  frame  720  pos ( -5995.6 -4500.1   3155.1)  fwd   79.47  action 00880456
+  frame  750  pos ( -6159.2 -4559.6   3780.3)  fwd   67.85  action 00880456
+the star at frame 768, as it should be

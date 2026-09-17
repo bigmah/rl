@@ -327,6 +327,7 @@ struct Log {
     float frames;          /* frames to the door, the whole clock if it stayed shut: what is minimized */
     float closest;         /* the nearest he came to the door without opening it (the bridge starts at 2980). Logged only: the policy never sees it */
     float novelty;         /* what novelty paid this episode */
+    float ghost;           /* what beating the archive to cubes on the way to the goal paid this episode */
     float cells;           /* cubes entered this episode */
     float explored;        /* cubes any game has ever entered, as of the end of this episode */
     float from_start;      /* fraction of episodes that began where the task does, not from the archive */
@@ -365,6 +366,8 @@ struct Env {
     int respawn;          /* a death puts the game back and the episode goes on, rather than ending it */
     float go_explore;     /* share of episodes that start from a cube in the archive */
     float go_explore_door; /* share of those that start from a cube on the way to a door, once there is one */
+    int go_explore_seed;  /* start the archive with the runs on file rather than with nothing */
+    float ghost;          /* reward per frame sooner than the archive's way into a cube on the way to the goal */
     float backward;       /* share of episodes that start on the demo, a little before the frontier */
     int backward_step;    /* frames the frontier moves back at a time */
     float backward_rate;  /* the door rate from the frontier that moves it back */
@@ -386,6 +389,7 @@ struct Env {
     uint32_t episode;     /* counts up from 1, to mark which cubes this episode has entered */
     uint32_t* entered;    /* the episode that last entered each cube */
     float novelty_earned;
+    float ghost_earned;
     int cells_entered;
     struct SM64Input* trail; /* every pad input since the savestate, replayed ones first */
     int trail_count, trail_capacity, trail_frames;
@@ -672,6 +676,42 @@ static int sm64_archive_start(SM64* env) {
     return cube;
 }
 
+/* --- the ghost ------------------------------------------------------------------
+ *
+ * The clock pays for speed only at the goal, and little: thirty frames off a
+ * 770-frame star is 0.02 of reward. What a run does get faster by is the archive, which keeps the shortest way into every
+ * cube -- so the archive's way into a cube is a ghost to race, as in a racing
+ * game, and beating it is paid where it happens rather than 400 frames later.
+ *
+ * The first time in an episode Mario enters a cube that has been on the way to
+ * the goal, sooner than the archive's way into it, he is paid `ghost` a frame
+ * of the difference, GHOST_MOST at most. The archive then keeps his way, so the
+ * ghost is as fast as he was and doing the same again pays nothing: only a
+ * faster run is ever paid, and a run fifty frames up on the ghost is paid at
+ * every cube for as long as it stays ahead.
+ *
+ * Only on the ground. A cube is 500 units high, so a jump that is going over
+ * the side passes through the cubes of the track below it on the way, sooner
+ * than anything that slid there; being first into a place he is about to fall
+ * out of is not beating anything. (The archive keeps those ways all the same,
+ * as it always has.)
+ */
+#define GHOST_MOST 0.1f
+
+static float sm64_ghost(SM64* env, int cube) {
+    if (env->ghost <= 0.0f || (sm64_action(env) & ACT_FLAG_AIR)) {
+        return 0.0f;
+    }
+    float pay = 0.0f;
+    pthread_mutex_lock(&sm64_archive_lock);
+    const SM64Cell* cell = &sm64_archive[cube];
+    if (sm64_cube_doors[cube] > 0 && cell->inputs != NULL && env->trail_frames < cell->frames) {
+        pay = fminf(env->ghost * (float)(cell->frames - env->trail_frames), GHOST_MOST);
+    }
+    pthread_mutex_unlock(&sm64_archive_lock);
+    return pay;
+}
+
 static float sm64_novelty(SM64* env, float x, float y, float z) {
     /* A place is somewhere Mario could be. Falling out of the world is not: a
      * cube is novelty_cell units, so a fall through empty space enters a fresh
@@ -693,12 +733,15 @@ static float sm64_novelty(SM64* env, float x, float y, float z) {
     if (visits == 1) {
         __sync_add_and_fetch(&sm64_cubes_explored, 1);
     }
+    float ghost = 0.0f;
     if (env->go_explore > 0.0f) {
+        ghost = sm64_ghost(env, cube); /* against the way on file, before his own replaces it */
         sm64_archive_offer(env, cube);
     }
     float bonus = env->novelty_episode + env->novelty / sqrtf((float)visits);
     env->novelty_earned += bonus;
-    return bonus;
+    env->ghost_earned += ghost;
+    return bonus + ghost;
 }
 
 /* --- the controller ---------------------------------------------------------
@@ -1378,6 +1421,129 @@ static void sm64_demo_result(SM64* env, int door) {
     pthread_mutex_unlock(&sm64_demo_lock);
 }
 
+/* --- an archive that starts with the runs on file ------------------------------
+ *
+ * The archive is the process's, so every run began with none and spent its
+ * first ten minutes finding the way down the slide again -- and two runs' finds
+ * never met: the fastest way over the top was in one run's archive and the best
+ * jump off the upper track in another's, and no episode could start on the one
+ * and make the other.
+ *
+ * With go_explore_seed on, the first game to start plays every run on file once
+ * -- the demo, the folder of the fastest, and any kept by hand in a folder
+ * beside them, <demo>-seeds/ -- and offers each cube on the way
+ * to the archive, as the episode that found it did, then credits those cubes as
+ * on the way to the goal, which they are. The archive keeps the shortest way to
+ * a cube, so what a run starts with is the best of all of them at every place,
+ * and half its archive starts are along them from the first episode.
+ *
+ * A run stops being offered the step it reaches the goal, as an episode does:
+ * a cube kept after that would start episodes with the star already his.
+ */
+static int sm64_seeded;
+static pthread_mutex_t sm64_seed_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Play one run on file into the archive. Returns whether the file had a run in it. */
+static int sm64_seed_from(SM64* env, const char* path) {
+    int count, frames;
+    SM64Input* inputs = sm64_demo_read(path, &count, &frames);
+    if (inputs == NULL) {
+        return 0;
+    }
+    if (!n64gym_load_state(&env->gym, sm64_state_path())) {
+        fprintf(stderr, "sm64: could not put the game back to play %s: %s\n", path, env->gym.error);
+        exit(1);
+    }
+    env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
+    env->trail_count = 0;
+    env->trail_frames = 0;
+    env->episode++; /* the cubes this run enters are marked as its own */
+    int reached = 0;
+    n64gym_draw(&env->gym, N64B_GYM_DRAW_NOTHING);
+    for (int k = 0; k < count; k++) {
+        n64gym_pad(&env->gym, inputs[k].buttons, inputs[k].stick_x, inputs[k].stick_y);
+        if (!n64gym_step(&env->gym, inputs[k].frames)) {
+            fprintf(stderr, "sm64: the game stopped while playing %s: %s\n", path, env->gym.error);
+            exit(1);
+        }
+        sm64_trail_push(env, inputs[k].buttons, inputs[k].frames, inputs[k].stick_x, inputs[k].stick_y);
+        if (sm64_goal_reached(env)) {
+            reached = 1;
+            break;
+        }
+        int cube = sm64_in_the_world(env) ? sm64_cube(env, sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2)) : -1;
+        if (cube < 0 || env->entered[cube] == env->episode) {
+            continue;
+        }
+        env->entered[cube] = env->episode;
+        sm64_archive_offer(env, cube);
+    }
+    if (reached) {
+        sm64_credit_door(env, -1);
+    } else {
+        fprintf(stderr, "sm64: %s does not reach the goal when played; its cubes are kept, not credited\n", path);
+    }
+    free(inputs);
+    return 1;
+}
+
+static void sm64_archive_seed(SM64* env) {
+    pthread_mutex_lock(&sm64_seed_lock);
+    if (!sm64_seeded) {
+        sm64_seeded = 1;
+        char names[FASTEST_RUNS][32];
+        int listed;
+        pthread_mutex_lock(&sm64_demo_lock);
+        if (sm64_fastest_count < 0) {
+            sm64_fastest_read();
+        }
+        listed = sm64_fastest_count < FASTEST_RUNS ? sm64_fastest_count : FASTEST_RUNS;
+        memcpy(names, sm64_fastest, sizeof(names));
+        pthread_mutex_unlock(&sm64_demo_lock);
+
+        int runs = sm64_seed_from(env, sm64_demo_path());
+        for (int k = 0; k < listed; k++) {
+            char path[1100];
+            snprintf(path, sizeof(path), "%s/%s", sm64_fastest_dir, names[k]);
+            runs += sm64_seed_from(env, path);
+        }
+        /* And any run kept by hand beside them, in <demo>-seeds/. The folder of
+         * the fastest drops a run once ten are faster, and with it whatever only
+         * that run had: a way over the top, a line through a turn. */
+        char seeds[1100];
+        const char* demo = sm64_demo_path();
+        size_t stem = strlen(demo);
+        if (stem >= 5 && strcmp(demo + stem - 5, ".demo") == 0) {
+            stem -= 5;
+        }
+        snprintf(seeds, sizeof(seeds), "%.*s-seeds", (int)stem, demo);
+        DIR* dir = opendir(seeds);
+        if (dir != NULL) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL) {
+                size_t length = strlen(entry->d_name);
+                if (length > 5 && strcmp(entry->d_name + length - 5, ".demo") == 0) {
+                    char path[1400];
+                    snprintf(path, sizeof(path), "%s/%s", seeds, entry->d_name);
+                    runs += sm64_seed_from(env, path);
+                }
+            }
+            closedir(dir);
+        }
+        fprintf(stderr, "sm64: the archive starts with %d cubes, %d of them on the way to the goal, from %d runs on file\n",
+                sm64_archive_size, sm64_door_cube_count, runs);
+        n64gym_draw(&env->gym, N64B_GYM_DRAW_LAST_FRAME);
+        if (!n64gym_load_state(&env->gym, sm64_state_path())) {
+            fprintf(stderr, "sm64: could not put the game back after seeding the archive: %s\n", env->gym.error);
+            exit(1);
+        }
+        env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
+        env->trail_count = 0;
+        env->trail_frames = 0;
+    }
+    pthread_mutex_unlock(&sm64_seed_lock);
+}
+
 void init(SM64* env) {
     N64GymOptions options = {
         .host = sm64_setting("SM64_HOST", SM64_HOST),
@@ -1445,6 +1611,9 @@ void init(SM64* env) {
         fprintf(stderr, "sm64: %s is act %d and SM64_ACT asks for %d; delete it to make it again\n", state,
                 n64_s16(&env->gym, CURR_ACT_NUM), env->goal_act);
         exit(1);
+    }
+    if (env->go_explore > 0.0f && env->go_explore_seed) {
+        sm64_archive_seed(env);
     }
 }
 
@@ -1601,6 +1770,7 @@ void puf_reset(SM64* env) {
     env->closest = sm64_goal_distance(env, env->last_x, env->last_z);
     env->episode++;
     env->novelty_earned = 0.0f;
+    env->ghost_earned = 0.0f;
     env->cells_entered = 0;
     sm64_write_observations(env, 0.0f);
 }
@@ -1644,6 +1814,7 @@ static void sm64_end_episode(SM64* env, int how) {
     env->log.frames += door ? (float)env->tick : (float)env->max_ticks;
     env->log.closest += door ? 0.0f : env->closest;
     env->log.novelty += env->novelty_earned;
+    env->log.ghost += env->ghost_earned;
     env->log.cells += (float)env->cells_entered;
     env->log.explored += (float)sm64_cubes_explored;
     env->log.from_start += (float)env->from_start;
@@ -1825,6 +1996,8 @@ void puf_init(Env* env, Dict* kwargs) {
     env->respawn = (int)dict_get(kwargs, "respawn");
     env->go_explore = (float)dict_get(kwargs, "go_explore");
     env->go_explore_door = (float)dict_get(kwargs, "go_explore_door");
+    env->go_explore_seed = (int)dict_get(kwargs, "go_explore_seed");
+    env->ghost = (float)dict_get(kwargs, "ghost");
     env->backward = (float)dict_get(kwargs, "backward");
     env->backward_step = (int)dict_get(kwargs, "backward_step");
     env->backward_rate = (float)dict_get(kwargs, "backward_rate");
@@ -1846,6 +2019,7 @@ void puf_log(Log* log, Dict* out) {
     dict_set(out, "frames", log->frames);
     dict_set(out, "closest", log->closest);
     dict_set(out, "novelty", log->novelty);
+    dict_set(out, "ghost", log->ghost);
     dict_set(out, "cells", log->cells);
     dict_set(out, "explored", log->explored);
     dict_set(out, "from_start", log->from_start);
