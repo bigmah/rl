@@ -432,6 +432,12 @@ def ppo_loss(logits, values, actions, old_logprobs, old_values, rewards, termina
     advantages = puff_advantage(live, rewards, terminals, importance, c['gamma'],
         c['gae_lambda'], c['vtrace_rho_clip'], c['vtrace_c_clip'])
     returns = live + advantages
+    if c.get('norm_adv', 0):
+        # Not in 5.0, which is why it is off unless a config asks: the minibatch's
+        # advantages centered and scaled to unit variance, as 4.0 did. Muon's update
+        # is the same size whatever the gradient, so with rewards as small as sm64's
+        # the policy term barely steers it otherwise; see the README.
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     clipped_ratio = mx.clip(ratio, 1 - c['clip_coef'], 1 + c['clip_coef'])
     pg_loss = mx.maximum(-advantages * ratio, -advantages * clipped_ratio).mean()

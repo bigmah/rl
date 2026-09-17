@@ -208,6 +208,20 @@ typedef float obs_t;
 #define LEVEL_PSS 27               /* Peach's Secret Slide, which has no act select */
 #define CURR_COURSE_NUM 0x8033BAC6 /* s16; Bob-omb Battlefield is course 1 */
 #define CURR_ACT_NUM 0x8033BAC8    /* s16 */
+/* When the star is won. A star that a box or a boss lets out, or that the slide
+ * awards for a time, is spawned: it stops time, plays its cutscene for about a
+ * hundred frames while Mario stands frozen, and lands where he can take it. So
+ * the episode ends the frame time stops for a spawning star, as the door's ends
+ * the frame the door starts to open: what follows is the same on every run.
+ * gTimeStopState is the halfword at 0x8033D482 -- found by diffing the console's
+ * memory before and during the freeze; it is the one word that goes from 0 to
+ * 0x4A and stays there -- and a spawning star sets it to ENABLED (2) |
+ * MARIO_AND_DOORS (8), with ACTIVE (0x40) coming on as it takes hold. Nothing
+ * else in a course sets MARIO_AND_DOORS: dialog sets DIALOG (4) instead, and
+ * the doors that set it are in the castle. Touching a star that was already
+ * there still counts, by the star count going up. */
+#define TIME_STOP_STATE 0x8033D482 /* s16 */
+#define TIME_STOP_MARIO_AND_DOORS 0x08
 #define DOOR_WARP_NODE_LEFT 0x80196414
 #define DOOR_WARP_NODE_RIGHT 0x80196420
 #define DOOR_WARP_TO_CASTLE_LEFT 0x00060100 /* node 0 -> level 6, area 1, node 0 */
@@ -350,6 +364,7 @@ struct Env {
     float backward;       /* share of episodes that start on the demo, a little before the frontier */
     int backward_step;    /* frames the frontier moves back at a time */
     float backward_rate;  /* the door rate from the frontier that moves it back */
+    int backward_start;   /* frames before the door the frontier begins at; 0 is backward_step */
     int window;           /* draw the game, for watching a policy play */
     int picture_width;    /* the game's picture in the observation, shrunk to this; 0 is none */
     int picture_height;
@@ -439,12 +454,15 @@ static inline int sm64_home_level(const SM64* env) {
     return env->star ? env->goal_level : LEVEL_CASTLE_GROUNDS;
 }
 
-/* The door, the frame it starts to open, or a star, the frame he touches it. The
- * level check is only a backstop for the door: a step is two frames, so its
- * action is always seen before the warp inside. */
+/* The door, the frame it starts to open, or a star, the frame it is his: the
+ * frame time stops for one spawning (see TIME_STOP_STATE), or the frame he
+ * touches one that was there already. The level check is only a backstop for
+ * the door: a step is two frames, so its action is always seen before the warp
+ * inside. */
 static int sm64_goal_reached(SM64* env) {
     if (env->star) {
-        return n64_s16(&env->gym, env->mario + M_NUM_STARS) > env->stars_at_start;
+        return n64_s16(&env->gym, env->mario + M_NUM_STARS) > env->stars_at_start ||
+               (n64_s16(&env->gym, TIME_STOP_STATE) & TIME_STOP_MARIO_AND_DOORS) != 0;
     }
     uint32_t action = sm64_action(env);
     return action == ACT_PUSHING_DOOR || action == ACT_PULLING_DOOR || sm64_level(env) == LEVEL_CASTLE;
@@ -936,17 +954,19 @@ static const char* sm64_state_path(void) {
  *
  * Every exploring run (go_explore on) that opens the door offers its inputs,
  * from the savestate, to the demo file (SM64_DEMO), which keeps the fastest
- * door any of them has found. A `backward` share of episodes replay that demo
- * up to somewhere between the frontier and backward_step frames nearer the
- * door, and play from there. The frontier begins backward_step frames before
+ * door any of them has found -- and so does every robustifying run (backward
+ * on), so a policy that beats its demo leaves a faster one for the next run.
+ * A `backward` share of episodes start on that demo
+ * at the frontier -- the game as the demo left it that many frames before the
+ * door -- and play from there. The frontier begins backward_step frames before
  * the door. Once backward_rate of
  * a window of episodes started from it open the door, it moves backward_step
  * frames further back, until it is the start of the demo. The rest of the
  * episodes start where the task does, so start_perf / from_start is still the
  * door rate that counts.
  *
- * Half the episodes on the demo start anywhere between the frontier and the
- * door instead, and do not count toward moving it, so what the policy has
+ * Half the episodes on the demo start at a frontier already passed, nearer the
+ * door, instead, and do not count toward moving it, so what the policy has
  * already learned keeps being paid for. Without them, the first run's frontier
  * went from 30 frames to 180 in 165K steps, into Lakitu's speech (348 to 102
  * frames before the door in that demo), and stopped there. Every episode on
@@ -964,6 +984,16 @@ typedef struct {
     int32_t count;  /* inputs */
     int32_t frames; /* from the savestate to the frame the door starts to open */
 } SM64DemoHeader;
+
+/* A run's inputs, hashed (FNV-1a): the same run found twice hashes the same. */
+static uint32_t sm64_inputs_hash(const SM64Input* inputs, int count) {
+    uint32_t hash = 2166136261u;
+    const uint8_t* byte = (const uint8_t*)inputs;
+    for (size_t k = 0; k < (size_t)count * sizeof(SM64Input); k++) {
+        hash = (hash ^ byte[k]) * 16777619u;
+    }
+    return hash;
+}
 
 static SM64Input* sm64_demo;      /* what this run robustifies, read once */
 static int sm64_demo_count, sm64_demo_frames;
@@ -1111,13 +1141,8 @@ static void sm64_fastest_offer(SM64* env) {
         sm64_fastest_read();
     }
     if (sm64_fastest_count < FASTEST_RUNS || env->trail_frames < sm64_fastest_frames[FASTEST_RUNS - 1]) {
-        uint32_t hash = 2166136261u; /* FNV-1a */
-        const uint8_t* byte = (const uint8_t*)env->trail;
-        for (size_t k = 0; k < (size_t)env->trail_count * sizeof(SM64Input); k++) {
-            hash = (hash ^ byte[k]) * 16777619u;
-        }
         char name[32];
-        snprintf(name, sizeof(name), "%05d-%08x.demo", env->trail_frames, hash);
+        snprintf(name, sizeof(name), "%05d-%08x.demo", env->trail_frames, sm64_inputs_hash(env->trail, env->trail_count));
         int kept = 0;
         for (int k = 0; k < sm64_fastest_count; k++) {
             kept |= strcmp(sm64_fastest[k], name) == 0;
@@ -1135,38 +1160,140 @@ static void sm64_fastest_offer(SM64* env) {
 }
 
 /* Read the demo to robustify, once for the process. */
+static char sm64_demo_states[1100]; /* where the game is kept at each point of the demo episodes start from */
+
+/* Remove every folder of states beside this one for the same demo file -- the
+ * states of demos since replaced. Only files named like a state go, and a folder
+ * with anything else in it stays. */
+static void sm64_remove_other_states(const char* keep) {
+    const char* slash = strrchr(keep, '/');
+    const char* tag = strstr(slash != NULL ? slash : keep, "-states-");
+    if (tag == NULL) {
+        return;
+    }
+    char directory[1100];
+    snprintf(directory, sizeof(directory), "%.*s", slash != NULL ? (int)(slash - keep) : 1, slash != NULL ? keep : ".");
+    const char* name = slash != NULL ? slash + 1 : keep;
+    size_t prefix = (size_t)(tag - name) + strlen("-states-");
+    DIR* dir = opendir(directory);
+    if (dir == NULL) {
+        return;
+    }
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, name, prefix) != 0 || strcmp(entry->d_name, name) == 0) {
+            continue;
+        }
+        char other[1300];
+        snprintf(other, sizeof(other), "%s/%s", directory, entry->d_name);
+        DIR* states = opendir(other);
+        if (states == NULL) {
+            continue;
+        }
+        struct dirent* state;
+        while ((state = readdir(states)) != NULL) {
+            int frame;
+            if (sscanf(state->d_name, "%d.state", &frame) == 1) {
+                char path[1600];
+                snprintf(path, sizeof(path), "%s/%s", other, state->d_name);
+                remove(path);
+            }
+        }
+        closedir(states);
+        rmdir(other);
+    }
+    closedir(dir);
+}
+
 static void sm64_demo_load(SM64* env) {
     pthread_mutex_lock(&sm64_demo_lock);
     if (sm64_demo == NULL) {
-        sm64_demo = sm64_demo_read(sm64_demo_path(), &sm64_demo_count, &sm64_demo_frames);
+        const char* path = sm64_demo_path();
+        sm64_demo = sm64_demo_read(path, &sm64_demo_count, &sm64_demo_frames);
         if (sm64_demo == NULL) {
             fprintf(stderr, "sm64: backward needs a door to work back from, and there is none in %s.\n"
-                            "      Explore first: ./build/sm64_tool explore\n", sm64_demo_path());
+                            "      Explore first: ./build/sm64_tool explore\n", path);
             exit(1);
         }
-        int first = env->backward_step > 0 ? env->backward_step : 1;
+        int first = env->backward_start > 0 ? env->backward_start : env->backward_step > 0 ? env->backward_step : 1;
         sm64_frontier = first < sm64_demo_frames ? first : sm64_demo_frames;
+        /* door.demo -> door-states-9a3c1e2b/, named for this demo's inputs, so
+         * another demo's states are never mistaken for its own. The states of
+         * demos this one has replaced are 8 MB each and no use now, so they go. */
+        size_t stem = strlen(path);
+        if (stem >= 5 && strcmp(path + stem - 5, ".demo") == 0) {
+            stem -= 5;
+        }
+        snprintf(sm64_demo_states, sizeof(sm64_demo_states), "%.*s-states-%08x", (int)stem, path,
+                 sm64_inputs_hash(sm64_demo, sm64_demo_count));
+        sm64_remove_other_states(sm64_demo_states);
     }
     pthread_mutex_unlock(&sm64_demo_lock);
 }
 
-/* Start on the demo: replay it to somewhere between the frontier and
- * backward_step frames nearer the door, or, half the time, to anywhere between
- * the frontier and the door. */
+/* Put the game where the trail, a prefix of the demo, leads.
+ *
+ * Replaying it costs as many frames as the demo has before that point: on the
+ * slide, 1200 frames of demo for an episode 30 frames from the star that will
+ * itself last 330, and the eight games step in lockstep, so one replaying holds
+ * the other seven. The game is deterministic, so the first episode to reach a
+ * point on the demo saves the game there, in a folder beside the demo, and every
+ * episode after loads it -- 8 MB read instead of a second of play. Which game
+ * saved it makes no difference to what is in it.
+ *
+ * A loaded start does not mark the cubes the demo passed through as this
+ * episode's, as a replayed one does. That only matters with novelty or the
+ * archive on, which robustifying turns off. */
+static void sm64_demo_go(SM64* env) {
+    if (env->trail_count == 0) {
+        return; /* the savestate itself, which reset has just loaded */
+    }
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%05d.state", sm64_demo_states, env->trail_frames);
+    struct stat ignored;
+    if (stat(path, &ignored) == 0 && n64gym_load_state(&env->gym, path)) {
+        env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
+        /* The camera, as the last input of the replay would have measured it. */
+        const SM64Input* last = &env->trail[env->trail_count - 1];
+        env->had_stick = last->stick_x != 0.0f || last->stick_y != 0.0f;
+        if (env->had_stick) {
+            float angle = atan2f(last->stick_x, -last->stick_y) * (65536.0f / (2.0f * (float)M_PI));
+            env->last_stick_angle = (int)lroundf(angle) & 0xFFFF;
+            sm64_watch_camera(env);
+        }
+        n64gym_draw(&env->gym, N64B_GYM_DRAW_LAST_FRAME);
+        return;
+    }
+    sm64_replay_trail(env);
+    mkdir(sm64_demo_states, 0755);
+    char temporary[1300];
+    snprintf(temporary, sizeof(temporary), "%s.%d", path, (int)env->rng);
+    if (!n64gym_save_state(&env->gym, temporary) || rename(temporary, path) != 0) {
+        fprintf(stderr, "sm64: could not keep the game at frame %d of the demo in %s\n", env->trail_frames, path);
+        remove(temporary);
+    }
+}
+
+/* Start on the demo: at the frontier, or, half the time, at any of the
+ * frontiers already passed, nearer the door. Starts are on the frontier's grid
+ * of backward_step frames, so there are as many places to start as there are
+ * frontiers, and as many states to keep (see sm64_demo_go). */
 static void sm64_demo_start(SM64* env) {
     pthread_mutex_lock(&sm64_demo_lock);
     int frontier = sm64_frontier;
     pthread_mutex_unlock(&sm64_demo_lock);
-    int nearest = frontier - env->backward_step;
-    if (nearest < 1) {
-        nearest = 1;
-    }
+    int step = env->backward_step > 0 ? env->backward_step : 1;
+    int before = frontier;
     env->start_frontier = frontier;
     if (rand_r(&env->seed) % 2 == 0) {
-        nearest = 1;
-        env->start_frontier = -1; /* rehearsal: does not count toward moving the frontier */
+        /* Rehearsal: does not count toward moving the frontier. */
+        int passed = frontier / step > 0 ? frontier / step : 1;
+        before = step * (1 + (int)(rand_r(&env->seed) % (unsigned)passed));
+        if (before > frontier) {
+            before = frontier;
+        }
+        env->start_frontier = -1;
     }
-    int before = nearest + (int)(rand_r(&env->seed) % (unsigned)(frontier - nearest + 1));
     env->trail_count = 0;
     env->trail_frames = 0;
     for (int k = 0; k < sm64_demo_count; k++) {
@@ -1176,7 +1303,7 @@ static void sm64_demo_start(SM64* env) {
         sm64_trail_push(env, sm64_demo[k].buttons, sm64_demo[k].frames, sm64_demo[k].stick_x,
                         sm64_demo[k].stick_y);
     }
-    sm64_replay_trail(env);
+    sm64_demo_go(env);
 
     /* The clock starts partway, so an episode has as long to reach the door as
      * the demo took from here plus DEMO_SLACK, never more than the whole clock,
@@ -1540,8 +1667,15 @@ void puf_step(SM64* env) {
         agent->rewards[0] = DOOR_REWARD - step_cost;
         env->episode_return += agent->rewards[0];
         sm64_fastest_offer(env);
-        if (env->go_explore > 0.0f) {
+        /* An exploring run offers its way to the demo, and so does a
+         * robustifying one: a policy that gets there faster than the demo it
+         * started on -- from the real start, or from a frontier, the replayed
+         * part included -- is the demo the next run should work back along. The
+         * run under way keeps the demo it read when it started. */
+        if (env->go_explore > 0.0f || env->backward > 0.0f) {
             sm64_demo_offer(env);
+        }
+        if (env->go_explore > 0.0f) {
             sm64_credit_door(env, sm64_cube(env, sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2)));
         }
         sm64_end_episode(env, ENDED_DOOR);
@@ -1657,6 +1791,7 @@ void puf_init(Env* env, Dict* kwargs) {
     env->backward = (float)dict_get(kwargs, "backward");
     env->backward_step = (int)dict_get(kwargs, "backward_step");
     env->backward_rate = (float)dict_get(kwargs, "backward_rate");
+    env->backward_start = (int)dict_get(kwargs, "backward_start");
     env->window = (int)dict_get(kwargs, "window");
     env->picture_width = (int)dict_get(kwargs, "picture_width");
     env->picture_height = (int)dict_get(kwargs, "picture_height");

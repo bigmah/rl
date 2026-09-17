@@ -33,10 +33,14 @@ make sm64-demo        # no policy at all: hold forward and jump
 ./build/sm64_tool probe door   # a scripted walk to the door, printing the reward
 make sm64-explore     # Go-Explore phase 1 with no policy: find the door, keep the fastest run
 ./build/sm64_tool replay       # check that run still opens the door (add `watch` to see it)
-SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay watch build/sm64/star-level27-act0-fastest/01326-4f16ec26.demo
+SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay watch build/sm64/star-level27-act0-fastest/00936-3441af34.demo
                                # any of the ten fastest runs to the goal, kept by any run, training or exploring
+SM64_TRACE=30 ./build/sm64_tool replay         # and where Mario is every thirty frames of the way
 make sm64-robustify   # Go-Explore phase 2: train a policy to open it from the real start
 make sm64-slide       # a different goal: the star at the bottom of Peach's Secret Slide
+make sm64-slide-explore    # phase 1 on the slide: random sliding from the archive, keeping the fastest star
+make sm64-slide-robustify  # phase 2 on the slide: a policy that reaches the star from the top
+make sm64-slide-watch      # watch its most trained checkpoint go for the star
 ```
 
 It needs your own dump of the cartridge, recompiled once: drop `sm64.z64` on N64Bundler so it appears in its library as `NSME`. `build.sh` finds the recompiled game there. Set `N64BUNDLER` if that checkout is not at `../static_recomp/n64bundler`. No game data is copied into this repository, and everything derived from it lands in the gitignored `build/`.
@@ -112,6 +116,10 @@ The log reports:
 
 `SM64_GOAL=star` races to a star instead of the door, and `SM64_LEVEL` and `SM64_ACT` say which one: 9 is Bob-omb Battlefield, 24 is Whomp's Fortress, 27 is Peach's Secret Slide. The castle door's warp nodes are pointed at that course's painting entry, and the act is written over the selected one while the course loads — a new save file offers only act 1, and the act is what decides which star the level script spawns. A secret course has no act select, so there the act is left where the game puts it, which is 0. Each course and act keeps its own state and demo (`star-level24-act2.state`).
 
+**When a star is won.** A star that a box or a boss lets out, or that the slide awards for a time, is *spawned*: it stops time, plays its cutscene for about a hundred frames while Mario stands frozen in whatever he was doing, and then lands where he can take it. Every slide star on file did the same thing at the end — a kick or a ground pound on the box at the bottom, then a hundred frames of nothing, then the star — so **the episode ends the frame time stops for a spawning star**, as the door's ends the frame the door starts to open: what follows is the same on every run. The game keeps its time-stop flags in a halfword at `0x8033D482`, found by snapshotting the console's memory before and during the freeze and looking for the one word that goes from 0 to something and stays there — it goes to `0x4A`, which is time stop enabled (2), Mario and doors (8) and active (0x40), and a spawning star is what sets Mario-and-doors in a course (dialog sets a different bit; the doors that set it are in the castle). A star that was already there still counts, by the star count going up the frame he touches it.
+
+Demos kept before that were measured to the touch, about a hundred frames later. `./build/sm64_tool trim [file...]` replays a demo, cuts it where the goal is now reached, and writes it back — renaming a run in a fastest-runs folder for its new length — and `replay` says when a demo wants trimming.
+
 ```sh
 SM64_GOAL=star SM64_LEVEL=24 SM64_ACT=2 make sm64-picture ARGS="--env.respawn 1"
 ```
@@ -143,6 +151,8 @@ It is a secret course, so there is no act select: the game keeps its act at 0, n
 
 **It is far easier to stumble into.** Go-Explore's first phase, random buttons from the archive, found the star in 60 seconds and four of them in two minutes. The castle door took 200 seconds for its first, and Whomp's Fortress never reached a star at all. `./build/sm64_tool replay` lands the fastest of them on the same frame it was found on.
 
+Eight minutes of it found 40 stars and took the fastest from 1,326 frames to 1,246, so random play from the archive does shorten the way, but slowly. Since then the explorer plays a course differently from the grounds (`make sm64-slide-explore`): A is held and let go like B and Z rather than drawn fresh every step — that was for Lakitu, and a jump every step is the slowest way down a slide — and half the time the stick is redrawn it goes straight ahead, because a course is covered by going somewhere. That version has not been timed against the old one.
+
 **Twenty minutes of training** — the star, the clock and novelty, with the archive on and `respawn = 1` — is 3.81M steps at 3,900 a second:
 
 | steps | cubes entered per episode | distance | episode return | cubes explored | stars |
@@ -155,7 +165,7 @@ It is a secret course, so there is no act select: the game keeps its act at 0, n
 
 One star in 2,653 episodes, still climbing at the end. It started from a cube in the archive rather than from the top of the slide, and `start_perf` never left 0. It is a faster star than the explorer's, though — 1,378 frames from the savestate against 1,940, and it replays.
 
-Both are longer than the 900-frame clock, which the archive's replay doesn't spend, so nothing has yet gone from the top of the slide to the star inside one episode. There is room to: holding forward covers the slide in about 600 frames, and then flies off near the bottom.
+Both are longer than the 900-frame clock, which the archive's replay doesn't spend, so nothing had gone from the top of the slide to the star inside one episode. **The clock was the problem.** `SM64_TRACE=30 ./build/sm64_tool replay` prints where a demo has Mario every thirty frames, and the 1,326-frame star looks like this: 170 frames walking about the top, then 960 frames of sliding from y 6,144 down to y −4,500, the slide winding through six turns on the way, then 200 frames at the bottom before the star. Holding forward does not cover the slide in 600 frames; it covers *half* of it, and flies off the side at the fourth turn. At the pace an explorer slides, the star is 1,100 frames from the top, and the 900-frame clock could never fit it. So this course gets a 1,500-frame clock (`make sm64-slide` and the other slide targets pass `--env.max-ticks 1500`), and every frame of it still costs, so faster is still better.
 
 **Novelty was paying for falling out of the world.** A cube is 500 units, so a fall through empty space enters a fresh one every 500 units down, and each pays `novelty_episode` again in every episode. `sm64_tool probe forward` shows it: at frame 660, off the side of the slide at y −1,675 with no floor under him and nothing below but the death plane, the step paid +0.0678, which is a cube nobody had entered. Worse, those cubes went into the archive, and few runs fall down the same column, so they were among the rarest — which is what it draws first, restarting episodes midway through a fall. In a course whose only way to lose is going over the side, that is paying to lose, twice.
 
@@ -193,6 +203,9 @@ Driven by the scripted walk instead of a policy, the frontier goes all the way b
 
 - **Rehearsal.** The first run's frontier went from 30 frames to 180 in 165K steps, into Lakitu's speech (348 to 102 frames before the door in this demo), and stopped. Every episode on the demo then started where the policy couldn't yet win, and by 200K steps it played at random (entropy 4.3 of 4.9). Now half the episodes on the demo start anywhere between the frontier and the door, and don't count toward moving it.
 - **The clock.** The second run gave every episode on the demo the whole 900 frames. Most ran all of it and paid −1, entropy fell to 0.01, and the frontier stuck at 120. The next runs started the clock at what the demo's read at that point, and the stable ones stuck at 570: that far back, the explorer's early wandering had already used a hundred frames, so those episodes had less time than a real start. Now an episode on the demo gets as long as the demo took from there plus ten seconds (`DEMO_SLACK`), and never more than the whole clock.
+- **The frontier is a savestate.** Getting to the frontier meant replaying the demo up to it, which costs as many frames as the demo has before that point, and the eight games step in lockstep, so one game replaying holds the other seven. On the slide that was 1,200 frames of demo for an episode 30 frames from the star that itself lasts 330, and training ran at 1,000 steps a second instead of 5,000. So the first episode to reach a point on the demo saves the game there, in a folder named for the demo (`star-level27-act0-states-8d5b4e43/01204.state`), and every episode after loads it: 8 MB read in place of a second of play. Starts are on the frontier's grid of `backward_step` frames — the frontier itself, or for a rehearsal any frontier already passed — so there are as many states as frontiers, about 40 for the slide's demo. The game is deterministic, so which game saved a state makes no difference to what is in it.
+- **A run can carry on from another.** The frontier is not in a checkpoint, so a run that loads one (`load_model_path`) used to start its frontier at `backward_step` again. `backward_start` puts it where the last run's got to, in frames before the door; 0 is `backward_step`.
+- **A robustifying run feeds the demo.** Only exploring runs used to offer a door to the demo file. Now a robustifying run does too, so a policy that gets there faster than the demo it started on — from the real start, or from a frontier with the replayed part counted — leaves a faster demo for the next run to work back along. The run under way keeps the demo it read when it started.
 - **The camera.** A replay didn't keep the measured camera offset up to date, so the first stick after any replayed start, from the archive or the demo, was aimed wrong. Replays now track it the way steps do.
 - **The learning rate.** At PufferLib's 0.015, the third run reached 360, then approximate KL hit 0.95 in one epoch and the door rate went to zero. At 0.005 it stays around 0.001.
 - **Entropy.** The first run held entropy at `sm64.ini`'s target of 2.5 and swung between 0.6 and 4.3. `make sm64-robustify` pays a fixed 0.01 instead.
@@ -275,6 +288,34 @@ A slide is where that would be expected to show. The 40 numbers say how fast Mar
 
 An episode ends when the door starts to open, when Mario dies or warps anywhere else, or after `max_ticks` frames (900, thirty seconds).
 
+### Robustifying the slide
+
+`make sm64-slide-robustify` is Go-Explore's second phase on the slide, with the 40 numbers and nothing else in the observation: work back along the fastest star on file, with only the star and the clock paying. Getting it to learn at all took five changes, each from a run that did not:
+
+- **The clock**, above: 1,500 frames, because the slide is 1,100 long.
+- **Normalized advantages** (`norm_adv`, see *Training on the Mac GPU with MLX*): under 5.0's update as it is, 1.5M steps learned nothing and entropy drifted to uniform.
+- **The star is won when it spawns** (see *Another course*): every star on file ended with a kick or a ground pound on the box at the bottom, then a hundred frames frozen while the star came down. Ending the episode at the spawn takes the dead frames out of every success and puts the reward on the move that earned it, fifty decisions sooner.
+- **The frontier is a savestate** (see *Go-Explore*): replaying 1,200 frames of demo to start a 330-frame episode ran training at 1,000 steps a second; loading the game there runs it at 5,000.
+- **A finer frontier.** Thirty frames worked for a door Mario walks into. The slide's ending is a speed trick — into the room at 77 units a frame, then a long jump that lands on the box two decisions later — and fifteen decisions of that, exactly, is too much to ask of a policy's first frontier. With 30-frame steps two runs spent 2.4M steps each stuck one frontier into the room, entropy climbing back toward uniform as the failures piled up; and each time the policy found a faster ending, the demo changed under the next run and the room had to be learned again. `--env.backward-step 10` asks for the last five decisions first, then ten.
+
+**The demo got faster as the policy did.** A robustifying run offers its stars to the demo file too, and the slide's went 1,326 (the explorer's, when this started) → 1,246 (eight minutes more exploring) → 1,184 (a policy beating the demo's ending from a frontier) → 1,080 (the same run, trimmed to the spawn) → 954: the policy's own ending, a long jump straight into the box from the bottom of the slide, where the explorer had flailed for 200 frames. The 780 frames of slide in it are the explorer's dive-slide at about 100 units a frame, which is close to as fast as the game slides.
+
+**How far it got: the ending, not the slide.** Five runs of 1.2M to 5.9M steps, at about 5,000 steps a second, each begun where the one before left off in some way (`backward_start`, `load_model_path`) or fresh:
+
+| run | frontier step | moves at | reached, in frames before the star | from the top, 50 episodes |
+|---|---|---|---|---|
+| 1, star counted at the touch | 30 | 50% | 180 of 1,226 (the freeze and the room) in 3.9M steps | 0 |
+| 2, star at the spawn | 30 | 50% | 210 of 1,080 in 5.9M; 2.4M of them stuck at 180 | 0 |
+| 3, carried on from 2 | 30 | 30% | 90 of 954, nothing in 1.9M | 0 |
+| 4, fresh | 10 | 40% | 90 of 954 in 2.6M | 0 |
+| 5, carried on from 4 | 30 | 20% | 90, nothing in 1.2M | 0 |
+
+Every run stopped where the demo's ending begins. The policy learns the last five, ten, fifteen decisions — the frontier moves through them — and then stalls once the frontier is far enough up the slide that its own sliding changes the state it arrives in, because the ending only works from the state the demo arrived in. At each stall entropy climbed back from 2.3 toward 4 as the failures piled up, which is the door's collapse again. The slide itself was never the problem: from any frontier state, holding the stick ahead slides into the room.
+
+So what the slide wants next is a demo with a robust ending — stop in the room, get under the box, jump — the way the door's demo ends with a walk into a door. `./build/sm64_tool probe door` is a scripted walk for the door; the box wants the same, or an explorer that stops. Given that, the frontier should run up the slide at a window an episode, since sliding generalizes and the box does not.
+
+What the runs leave behind is worth watching anyway: `SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay watch` plays the 936-frame star — 31 seconds from the savestate to the box, where the explorer's took 1,326 to the touch — and then five seconds more, so the star comes down.
+
 ### What this needed from the runtime
 
 A game that plays at sixty frames a second for a person is useless to something learning from it, so three things were added to N64Bundler (as patches `0018`-`0020` in its own series, plus a `--gym` mode in `n64b-run`):
@@ -349,6 +390,16 @@ That needed two config changes, both back to 5.0's defaults:
 | 5.0 with advantages normalized as 4.0 did, and nothing else changed | 1.8 |
 
 So the change that matters for sm64 is advantage normalization. Its rewards are small, and Muon's update is the same size whatever the gradient, so without normalization the policy term barely steers it.
+
+Robustifying the slide made that a wall rather than a slope. With only the star and the clock paying, and the star a hundred frames or more off, advantages run a tenth the size of the value error. Three 1.5M-step runs, the same but for these:
+
+| | entropy at 1.5M steps | frontier |
+|---|---|---|
+| 5.0 as it is (`vf_coef` 2.0) | 4.90, up from 4.83 | 150 the whole run |
+| `vf_coef` 0.5 (stopped at 0.7M, the same) | 4.83–4.89 | 150 |
+| advantages normalized | 4.4–4.7 | 180 |
+
+The first two never learned anything: entropy drifted *up* toward the 4.91 of a uniform policy, and the frontier sat where random play alone gets it. So `norm_adv = 1` in `[train]` normalizes each minibatch's advantages as 4.0 did. It is off in `sm64.ini` and `mlx_pufferl.py` has no other opinion, so the trainer stays 5.0's unless a run asks; `make sm64-slide-robustify` asks.
 
 ## Setup (macOS, Apple Silicon)
 

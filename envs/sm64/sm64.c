@@ -7,6 +7,7 @@
  *   sm64 bench [games]   how many agent steps a second, with that many games
  *   sm64 explore [games] [seconds] [frames]   Go-Explore with no policy, keeping the fastest door
  *   sm64 replay [watch] [file]  play that door back and check it still opens, or any run exploring kept
+ *   sm64 trim [file...]  cut demos where the goal is reached, for ones kept when it was measured later
  */
 
 #include <omp.h>
@@ -218,10 +219,20 @@ static int bench(int games, int steps) {
 static void explore_policy(SM64* env) {
     float* actions = env->agents[0].actions;
     if (rand_r(&env->seed) % 10 == 0) {
-        actions[0] = (float)(rand_r(&env->seed) % (STICK_DIRECTIONS + 1));
+        /* In a course, half the time the stick goes straight ahead: a course is
+         * covered by going somewhere, and on a slide that is what keeps him
+         * sliding. The grounds are explored as they were, every way alike. */
+        actions[0] = (env->star && rand_r(&env->seed) % 2 == 0)
+                         ? 1.0f
+                         : (float)(rand_r(&env->seed) % (STICK_DIRECTIONS + 1));
     }
-    actions[1] = (float)(rand_r(&env->seed) % 2);
-    for (int head = 2; head < ACTION_HEADS; head++) {
+    /* A is drawn fresh every step on the way to the door, because Lakitu is in
+     * the way. There is no Lakitu in a course, and a jump every step is the
+     * slowest way down a slide, so there A is held and let go like the others. */
+    if (!env->star) {
+        actions[1] = (float)(rand_r(&env->seed) % 2);
+    }
+    for (int head = env->star ? 1 : 2; head < ACTION_HEADS; head++) {
         if (rand_r(&env->seed) % 10 == 0) {
             actions[head] = (float)(rand_r(&env->seed) % 2);
         }
@@ -328,9 +339,12 @@ static int replay(int window, const char* path) {
     SM64* env = make_env(0, window);
     const char* goal = env->star ? "the star" : "the door";
     printf("%s: %d inputs, %d frames\n", path, count, frames);
+    /* SM64_TRACE=30 prints where Mario is every thirty frames of the way. */
+    int trace = atoi(sm64_setting("SM64_TRACE", "0"));
     int frame = 0;
     int opened = -1;
     int talking = 0;
+    int traced = 0;
     double started = now();
     for (int k = 0; k < count && opened < 0; k++) {
         n64gym_pad(&env->gym, inputs[k].buttons, inputs[k].stick_x, inputs[k].stick_y);
@@ -339,6 +353,13 @@ static int replay(int window, const char* path) {
             return 1;
         }
         frame += inputs[k].frames;
+        if (trace > 0 && frame >= traced + trace) {
+            traced = frame;
+            uint32_t action = sm64_action(env);
+            printf("  frame %4d  pos (%8.1f %7.1f %8.1f)  fwd %7.2f  action %08x%s%s\n", frame, sm64_pos(env, 0),
+                   sm64_pos(env, 1), sm64_pos(env, 2), sm64_forward_vel(env), action,
+                   (action & ACT_FLAG_AIR) ? "  (in the air)" : "", sm64_in_the_world(env) ? "" : "  (no floor)");
+        }
         puf_render(env);
         /* In a window it is being watched, so it is played at the speed a
          * console ran it rather than the three times that it replays at. */
@@ -362,15 +383,86 @@ static int replay(int window, const char* path) {
     if (opened == frames) {
         printf("%s at frame %d, as it should be\n", goal, opened);
     } else if (opened >= 0) {
-        printf("%s at frame %d, not %d\n", goal, opened, frames);
+        printf("%s at frame %d, not %d%s\n", goal, opened, frames,
+               opened < frames ? " (sm64_tool trim cuts the demo there)" : "");
     } else {
         printf("never reached %s; Mario ended at (%.0f %.0f %.0f), %.0f units from it across the ground\n", goal,
                sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2),
                sm64_goal_distance(env, sm64_pos(env, 0), sm64_pos(env, 2)));
     }
+    /* Watched, the episode's end is worth seeing too: the door swinging open, or
+     * the star coming down and the dance. Five seconds more, with nothing held. */
+    if (window && opened >= 0) {
+        n64gym_pad(&env->gym, 0, 0.0f, 0.0f);
+        for (int k = 0; k < 75; k++) {
+            n64gym_step(&env->gym, 2);
+            puf_render(env);
+        }
+    }
     puf_close(env);
     free(inputs);
     return opened == frames ? 0 : 1;
+}
+
+/* Cut each demo where the goal is reached, and write it back. For demos kept
+ * before the goal was measured earlier -- a star counted the frame it was
+ * touched, and now the frame its spawn stops time, about a hundred frames
+ * sooner. A demo whose goal is where its header says is left alone. */
+static int trim(int count_paths, char** paths) {
+    SM64* env = make_env(0, 0);
+    int failures = 0;
+    for (int p = 0; p < count_paths; p++) {
+        int count, frames;
+        SM64Input* inputs = sm64_demo_read(paths[p], &count, &frames);
+        if (inputs == NULL) {
+            printf("%s: not a demo\n", paths[p]);
+            failures++;
+            continue;
+        }
+        puf_reset(env);
+        int frame = 0, reached = -1, kept = count;
+        for (int k = 0; k < count && reached < 0; k++) {
+            n64gym_pad(&env->gym, inputs[k].buttons, inputs[k].stick_x, inputs[k].stick_y);
+            if (!n64gym_step(&env->gym, inputs[k].frames)) {
+                printf("the game stopped: %s\n", env->gym.error);
+                return 1;
+            }
+            frame += inputs[k].frames;
+            if (sm64_goal_reached(env)) {
+                reached = frame;
+                kept = k + 1;
+            }
+        }
+        if (reached < 0) {
+            printf("%s: never reaches the goal in %d frames, left as it is\n", paths[p], frames);
+            failures++;
+        } else if (reached == frames && kept == count) {
+            printf("%s: the goal is at frame %d as the header says\n", paths[p], frames);
+        } else if (sm64_demo_write(paths[p], 0, inputs, kept, reached)) {
+            printf("%s: cut at frame %d, from %d inputs and %d frames to %d and %d\n", paths[p], reached, count,
+                   frames, kept, reached);
+            /* A run in a fastest-runs folder is named for its frames and its
+             * inputs (01326-4f16ec26.demo), so it is renamed for the cut. */
+            const char* slash = strrchr(paths[p], '/');
+            const char* name = slash != NULL ? slash + 1 : paths[p];
+            int named_frames;
+            unsigned named_hash;
+            if (sscanf(name, "%5d-%8x.demo", &named_frames, &named_hash) == 2 && strlen(name) == 19) {
+                char renamed[1200];
+                snprintf(renamed, sizeof(renamed), "%.*s%05d-%08x.demo", (int)(name - paths[p]), paths[p], reached,
+                         sm64_inputs_hash(inputs, kept));
+                if (rename(paths[p], renamed) == 0) {
+                    printf("  and renamed to %s\n", renamed);
+                }
+            }
+        } else {
+            printf("%s: could not write it back\n", paths[p]);
+            failures++;
+        }
+        free(inputs);
+    }
+    puf_close(env);
+    return failures > 0;
 }
 
 int main(int argc, char** argv) {
@@ -395,7 +487,11 @@ int main(int argc, char** argv) {
         int window = argc > 2 && strcmp(argv[2], "watch") == 0;
         return replay(window, argc > 2 + window ? argv[2 + window] : sm64_demo_path());
     }
+    if (strcmp(what, "trim") == 0) {
+        char* demo = (char*)sm64_demo_path();
+        return trim(argc > 2 ? argc - 2 : 1, argc > 2 ? argv + 2 : &demo);
+    }
     printf("usage: sm64 [state | watch [forward|random|door] | probe [forward|random|door] | bench [games]\n"
-           "            | explore [games] [seconds] [frames] | replay [watch] [file]]\n");
+           "            | explore [games] [seconds] [frames] | replay [watch] [file] | trim [file...]]\n");
     return 2;
 }
