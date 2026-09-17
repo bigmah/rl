@@ -1,0 +1,23 @@
+demos/peach-slide/star-648.demo: 324 inputs, 648 frames
+  frame   30  pos (  5138.2  6144.0  -5609.6)  fwd   29.04  action 04000471
+  frame   60  pos (  3870.5  6181.8  -5666.0)  fwd   48.07  action 0188088a  (in the air)
+  frame   90  pos (  2309.5  5967.7  -5680.8)  fwd   73.28  action 00840452
+  frame  120  pos (  -321.5  5358.7  -5169.0)  fwd  101.87  action 00840452
+  frame  150  pos ( -3115.1  4712.6  -5286.5)  fwd  102.04  action 00840452
+  frame  180  pos ( -5776.4  4171.1  -4174.3)  fwd  101.22  action 00840452
+  frame  210  pos ( -6605.5  3792.0  -1375.8)  fwd  101.16  action 00840452
+  frame  240  pos ( -5327.0  3307.2   1239.0)  fwd  101.33  action 00840452
+  frame  270  pos ( -2454.2  2807.8   1726.1)  fwd  100.11  action 00840452
+  frame  300  pos (  -186.7  2912.4   1314.0)  fwd   65.18  action 03000880  (in the air)
+  frame  330  pos (  1468.8   836.4    523.5)  fwd   57.33  action 03000880  (in the air)
+  frame  360  pos (  1468.8   -87.6    523.5)  fwd    0.00  action 008008a9  (in the air)
+  frame  390  pos (  1513.1 -1479.1    197.0)  fwd   47.31  action 00840452
+  frame  420  pos (  1829.8 -1625.2  -1191.0)  fwd   66.21  action 00840452
+  frame  450  pos (  2117.9 -2094.4  -4011.6)  fwd  101.23  action 00840452
+  frame  480  pos (  1031.9 -2360.4  -6353.4)  fwd   97.24  action 00840452
+  frame  510  pos (  -725.7 -2812.6  -5274.4)  fwd   95.12  action 00840452
+  frame  540  pos ( -2441.4 -3213.6  -3325.6)  fwd   96.29  action 00840452
+  frame  570  pos ( -5236.1 -3723.9  -3668.9)  fwd  101.14  action 00840452
+  frame  600  pos ( -6729.5 -4079.3  -1299.8)  fwd   98.19  action 00840452
+  frame  630  pos ( -5895.0 -4344.6   1509.4)  fwd  100.85  action 00840452
+the star at frame 648, as it should be
