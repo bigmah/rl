@@ -9,6 +9,11 @@ frame every time.
 It is kept here because the copy the tools use, `build/sm64/star-level27-act0.demo`,
 is overwritten by any run that finds a faster star. This one stays as it is.
 
+`star-648.mp4` is the same run as a video: every frame the console showed, at
+thirty a second, from the savestate to the star's spawn and five seconds beyond
+so the star comes down. 640 by 474, twice the size the game renders headless,
+scaled by whole pixels. It plays anywhere; nothing below is needed to watch it.
+
 ## Playing it
 
 The game has to be set up first as the top-level README describes: N64Bundler
@@ -36,6 +41,14 @@ is (`SM64_TRACE` works with `watch` too):
 
 ```sh
 SM64_GOAL=star SM64_LEVEL=27 SM64_TRACE=30 ./build/sm64_tool replay demos/peach-slide/star-648.demo
+```
+
+Make the video again, or one of another demo. This plays the demo headless with
+the game drawing every frame and hands them to `ffmpeg`, which has to be on the
+path (`brew install ffmpeg`):
+
+```sh
+SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool record demos/peach-slide/star-648.demo demos/peach-slide/star-648.mp4
 ```
 
 `SM64_GOAL` and `SM64_LEVEL` are what tell the tool to load the course savestate

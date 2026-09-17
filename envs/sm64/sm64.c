@@ -7,6 +7,7 @@
  *   sm64 bench [games]   how many agent steps a second, with that many games
  *   sm64 explore [games] [seconds] [frames]   Go-Explore with no policy, keeping the fastest door
  *   sm64 replay [watch] [file]  play that door back and check it still opens, or any run exploring kept
+ *   sm64 record [file] [out.mp4]  play a demo back headless and write what the console showed, through ffmpeg
  *   sm64 trim [file...]  cut demos where the goal is reached, for ones kept when it was measured later
  */
 
@@ -404,6 +405,108 @@ static int replay(int window, const char* path) {
     return opened == frames ? 0 : 1;
 }
 
+/* One frame of a recording: the picture the console's video interface would
+ * show, handed to ffmpeg as raw RGBA. The first one says how big the video is,
+ * and starts ffmpeg; the picture is small (the size the game renders headless),
+ * so it is scaled up by whole pixels to at least 640 wide, sharp rather than
+ * blurred. A blanked screen has no picture and is skipped. */
+static int record_frame(SM64* env, FILE** video, int* width, int* height, const char* out) {
+    int w, h;
+    const uint8_t* picture = n64gym_picture(&env->gym, &w, &h);
+    if (picture == NULL) {
+        return 1;
+    }
+    if (*video == NULL) {
+        *width = w;
+        *height = h;
+        int scale = w < 640 ? (640 + w - 1) / w : 1;
+        char command[1200];
+        snprintf(command, sizeof(command),
+                 "ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgba -s %dx%d -r 30 -i - "
+                 "-vf scale=%d:%d:flags=neighbor -c:v libx264 -pix_fmt yuv420p -crf 18 -movflags +faststart \"%s\"",
+                 w, h, w * scale, h * scale, out);
+        *video = popen(command, "w");
+        if (*video == NULL) {
+            perror("ffmpeg");
+            return 0;
+        }
+        printf("  %dx%d frames, written at %dx%d\n", w, h, w * scale, h * scale);
+    } else if (w != *width || h != *height) {
+        fprintf(stderr, "the picture changed from %dx%d to %dx%d; stopping there\n", *width, *height, w, h);
+        return 0;
+    }
+    if (fwrite(picture, 4, (size_t)w * h, *video) != (size_t)w * h) {
+        fprintf(stderr, "ffmpeg stopped taking frames\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* Record a demo as a video: play it back headless with the game drawing every
+ * frame, and hand each one to ffmpeg at thirty a second, with five seconds more
+ * after the goal, as watching it gives, so the door swings open or the star
+ * comes down. The game is stepped a frame at a time so that every frame is
+ * drawn; the goal is checked where replay checks it, after each input. */
+static int record(const char* path, const char* out) {
+    int count, frames;
+    SM64Input* inputs = sm64_demo_read(path, &count, &frames);
+    if (inputs == NULL) {
+        printf("no demo in %s\n", path);
+        return 1;
+    }
+    /* Only a game opened with a picture draws one. The size here is the
+     * observation's, and does not matter: the frame handed over is the
+     * console's own. */
+    setenv("SM64_PICTURE", "80x60", 0);
+    SM64* env = make_env(0, 0);
+    const char* goal = env->star ? "the star" : "the door";
+    printf("%s: %d inputs, %d frames -> %s\n", path, count, frames, out);
+    FILE* video = NULL;
+    int width = 0, height = 0, written = 0, frame = 0, opened = -1, ok = 1;
+    for (int k = 0; k < count && opened < 0 && ok; k++) {
+        n64gym_pad(&env->gym, inputs[k].buttons, inputs[k].stick_x, inputs[k].stick_y);
+        for (int f = 0; f < inputs[k].frames && ok; f++) {
+            if (!n64gym_step(&env->gym, 1)) {
+                printf("the game stopped: %s\n", env->gym.error);
+                return 1;
+            }
+            frame++;
+            ok = record_frame(env, &video, &width, &height, out);
+            written += ok && video != NULL;
+        }
+        if (sm64_goal_reached(env)) {
+            opened = frame;
+        }
+    }
+    if (opened == frames) {
+        printf("%s at frame %d, as it should be\n", goal, opened);
+    } else if (opened >= 0) {
+        printf("%s at frame %d, not %d\n", goal, opened, frames);
+    } else {
+        printf("never reached %s; Mario ended at (%.0f %.0f %.0f)\n", goal, sm64_pos(env, 0), sm64_pos(env, 1),
+               sm64_pos(env, 2));
+    }
+    if (opened >= 0 && ok) {
+        n64gym_pad(&env->gym, 0, 0.0f, 0.0f);
+        for (int k = 0; k < 150 && ok; k++) {
+            n64gym_step(&env->gym, 1);
+            ok = record_frame(env, &video, &width, &height, out);
+            written += ok && video != NULL;
+        }
+    }
+    int status = 1;
+    if (video != NULL) {
+        status = pclose(video);
+        printf("  %d frames, %.1f seconds, in %s%s\n", written, written / 30.0, out,
+               status == 0 ? "" : " (ffmpeg failed)");
+    } else {
+        printf("  no frames: the game never drew a picture\n");
+    }
+    puf_close(env);
+    free(inputs);
+    return opened == frames && ok && status == 0 ? 0 : 1;
+}
+
 /* Cut each demo where the goal is reached, and write it back. For demos kept
  * before the goal was measured earlier -- a star counted the frame it was
  * touched, and now the frame its spawn stops time, about a hundred frames
@@ -487,11 +590,27 @@ int main(int argc, char** argv) {
         int window = argc > 2 && strcmp(argv[2], "watch") == 0;
         return replay(window, argc > 2 + window ? argv[2 + window] : sm64_demo_path());
     }
+    if (strcmp(what, "record") == 0) {
+        const char* demo = argc > 2 ? argv[2] : sm64_demo_path();
+        /* The video goes beside the demo, as door.mp4 for door.demo, unless said. */
+        char out[1200];
+        if (argc > 3) {
+            snprintf(out, sizeof(out), "%s", argv[3]);
+        } else {
+            size_t stem = strlen(demo);
+            if (stem >= 5 && strcmp(demo + stem - 5, ".demo") == 0) {
+                stem -= 5;
+            }
+            snprintf(out, sizeof(out), "%.*s.mp4", (int)stem, demo);
+        }
+        return record(demo, out);
+    }
     if (strcmp(what, "trim") == 0) {
         char* demo = (char*)sm64_demo_path();
         return trim(argc > 2 ? argc - 2 : 1, argc > 2 ? argv + 2 : &demo);
     }
     printf("usage: sm64 [state | watch [forward|random|door] | probe [forward|random|door] | bench [games]\n"
-           "            | explore [games] [seconds] [frames] | replay [watch] [file] | trim [file...]]\n");
+           "            | explore [games] [seconds] [frames] | replay [watch] [file] | record [file] [out.mp4]\n"
+           "            | trim [file...]]\n");
     return 2;
 }
