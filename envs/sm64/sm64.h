@@ -210,10 +210,14 @@ typedef float obs_t;
 #define CURR_ACT_NUM 0x8033BAC8    /* s16 */
 /* When the star is won. A star that a box or a boss lets out, or that the slide
  * awards for a time, is spawned: it stops time, plays its cutscene for about a
- * hundred frames while Mario stands frozen, and lands where he can take it. So
- * the episode ends the frame time stops for a spawning star, as the door's ends
- * the frame the door starts to open: what follows is the same on every run.
- * gTimeStopState is the halfword at 0x8033D482 -- found by diffing the console's
+ * hundred frames while Mario stands frozen, and lands where he can take it. The
+ * star is his the frame he touches it, by the star count going up, whether it
+ * spawned this episode or was there already. For a while the spawn was the
+ * goal, which took the frozen hundred frames out of every star and put the
+ * reward on the hit that earned it; but a star that has spawned is not yet
+ * won, and a policy that stops there has not taken it. The demos kept then end
+ * at the spawn, and sm64_tool says so when it replays one, from
+ * gTimeStopState: the halfword at 0x8033D482 -- found by diffing the console's
  * memory before and during the freeze; it is the one word that goes from 0 to
  * 0x4A and stays there -- and a spawning star sets it to ENABLED (2) |
  * MARIO_AND_DOORS (8), with ACTIVE (0x40) coming on as it takes hold. Nothing
@@ -455,17 +459,22 @@ static inline int sm64_home_level(const SM64* env) {
 }
 
 /* The door, the frame it starts to open, or a star, the frame it is his: the
- * frame time stops for one spawning (see TIME_STOP_STATE), or the frame he
- * touches one that was there already. The level check is only a backstop for
+ * star count going up as he touches it. The level check is only a backstop for
  * the door: a step is two frames, so its action is always seen before the warp
  * inside. */
 static int sm64_goal_reached(SM64* env) {
     if (env->star) {
-        return n64_s16(&env->gym, env->mario + M_NUM_STARS) > env->stars_at_start ||
-               (n64_s16(&env->gym, TIME_STOP_STATE) & TIME_STOP_MARIO_AND_DOORS) != 0;
+        return n64_s16(&env->gym, env->mario + M_NUM_STARS) > env->stars_at_start;
     }
     uint32_t action = sm64_action(env);
     return action == ACT_PUSHING_DOOR || action == ACT_PULLING_DOOR || sm64_level(env) == LEVEL_CASTLE;
+}
+
+/* Whether a star is spawning: time stopped for Mario and the doors (see
+ * TIME_STOP_STATE). Not the goal, but sm64_tool reports it, because the demos
+ * kept while it was the goal end there. */
+static int sm64_star_spawning(SM64* env) {
+    return env->star && (n64_s16(&env->gym, TIME_STOP_STATE) & TIME_STOP_MARIO_AND_DOORS) != 0;
 }
 
 /* --- novelty ------------------------------------------------------------------
@@ -920,8 +929,23 @@ static void sm64_goal_path(const char* path, int level, int act, char* out, size
 }
 
 static char sm64_star_state[1024];
-static char sm64_star_demo[1024];
+static char sm64_star_demo[1024];       /* the fastest touch of the star on file */
+static char sm64_star_spawn_demo[1024]; /* the fastest spawn, kept while that was the goal */
 static pthread_once_t sm64_paths_once = PTHREAD_ONCE_INIT;
+
+/* star-level27-act0.demo -> star-level27-act0-touch.demo. A star's demo counts
+ * the frames to the touch; the ones kept while the spawn was the goal stop a
+ * hundred or more frames short of it, so the two are kept apart and never
+ * compared: a touch of any length beats no touch. */
+static void sm64_touch_path(const char* path, char* out, size_t size) {
+    const char* dot = strrchr(path, '.');
+    const char* slash = strrchr(path, '/');
+    if (dot == NULL || (slash != NULL && dot < slash)) {
+        snprintf(out, size, "%s-touch", path);
+    } else {
+        snprintf(out, size, "%.*s-touch%s", (int)(dot - path), path, dot);
+    }
+}
 
 static void sm64_work_out_paths(void) {
     const char* state = sm64_setting("SM64_STAR_STATE", SM64_STAR_STATE);
@@ -929,11 +953,12 @@ static void sm64_work_out_paths(void) {
     int level = sm64_star_level(), act = sm64_star_act();
     if (level == LEVEL_BOB && act == 1) {
         snprintf(sm64_star_state, sizeof(sm64_star_state), "%s", state);
-        snprintf(sm64_star_demo, sizeof(sm64_star_demo), "%s", demo);
-        return;
+        snprintf(sm64_star_spawn_demo, sizeof(sm64_star_spawn_demo), "%s", demo);
+    } else {
+        sm64_goal_path(state, level, act, sm64_star_state, sizeof(sm64_star_state));
+        sm64_goal_path(demo, level, act, sm64_star_spawn_demo, sizeof(sm64_star_spawn_demo));
     }
-    sm64_goal_path(state, level, act, sm64_star_state, sizeof(sm64_star_state));
-    sm64_goal_path(demo, level, act, sm64_star_demo, sizeof(sm64_star_demo));
+    sm64_touch_path(sm64_star_spawn_demo, sm64_star_demo, sizeof(sm64_star_demo));
 }
 
 static const char* sm64_state_path(void) {
@@ -1210,6 +1235,18 @@ static void sm64_demo_load(SM64* env) {
     if (sm64_demo == NULL) {
         const char* path = sm64_demo_path();
         sm64_demo = sm64_demo_read(path, &sm64_demo_count, &sm64_demo_frames);
+        /* A star with no touch on file yet works back along the fastest spawn
+         * kept while that was the goal: the same route as far as the box. Its
+         * frames end where the star spawns, so an episode from its end has
+         * DEMO_SLACK to wait out the cutscene and take the star, and the first
+         * touch from anywhere on it is the touch demo. */
+        if (sm64_demo == NULL && env->star) {
+            path = sm64_star_spawn_demo;
+            sm64_demo = sm64_demo_read(path, &sm64_demo_count, &sm64_demo_frames);
+            if (sm64_demo != NULL) {
+                fprintf(stderr, "sm64: no touch of the star on file yet; working back along the spawn in %s\n", path);
+            }
+        }
         if (sm64_demo == NULL) {
             fprintf(stderr, "sm64: backward needs a door to work back from, and there is none in %s.\n"
                             "      Explore first: ./build/sm64_tool explore\n", path);

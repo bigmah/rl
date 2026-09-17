@@ -3,8 +3,12 @@
 `star-648.demo` is the fastest star on record here for Peach's Secret Slide
 (`SM64_LEVEL=27`): the pad inputs that take Mario from the course savestate to
 the star's spawn in 648 frames, 21.6 seconds at the game's thirty a second. The
-game is deterministic, so playing the inputs back lands the star on the same
+game is deterministic, so playing the inputs back spawns the star on the same
 frame every time.
+
+It was found when the spawn was the goal, so it ends there: the star comes down
+and Mario does not go and take it. The goal has since become the touch, and the
+tool reports this demo as "the star spawned at frame 648, as this demo says".
 
 It is kept here because the copy the tools use, `build/sm64/star-level27-act0.demo`,
 is overwritten by any run that finds a faster star. This one stays as it is.
@@ -13,6 +17,24 @@ is overwritten by any run that finds a faster star. This one stays as it is.
 thirty a second, from the savestate to the star's spawn and five seconds beyond
 so the star comes down. 640 by 474, twice the size the game renders headless,
 scaled by whole pixels. It plays anywhere; nothing below is needed to watch it.
+
+## The touch: 786 frames
+
+`star-786-touch.demo` goes all the way: the same route to the box, the hundred
+frames frozen while the star comes out, and then a jump to it, with the star
+his on frame 786, 26.2 seconds from the savestate. `star-786-touch.mp4` is its
+video, with the star dance after, and `route-786-touch.txt` its trace. This is
+the fastest touch on record, found on 2026-09-17 by an hour of the backward
+algorithm along the 648 run: episodes began at savestates ten, twenty, up to
+sixty frames before the box, with only the star and the clock paying, and the
+first touch from any of them became the demo. All nine of its 786-frame touches
+come from the last few frames of the route; the frontier got sixty frames back
+up the slide and no further in 15M steps. The 648 is 138 frames shorter only
+because it stops at the spawn: about a hundred of those frames are the freeze,
+which no run can shorten, and the rest the jump to where the star lands.
+
+Everything below applies to it the same way, with its file name in place of
+`star-648.demo`.
 
 ## Playing it
 

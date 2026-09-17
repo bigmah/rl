@@ -344,6 +344,7 @@ static int replay(int window, const char* path) {
     int trace = atoi(sm64_setting("SM64_TRACE", "0"));
     int frame = 0;
     int opened = -1;
+    int spawned = -1;
     int talking = 0;
     int traced = 0;
     double started = now();
@@ -372,6 +373,9 @@ static int replay(int window, const char* path) {
             }
         }
         uint32_t action = sm64_action(env);
+        if (spawned < 0 && sm64_star_spawning(env)) {
+            spawned = frame;
+        }
         if (sm64_goal_reached(env)) {
             opened = frame;
         } else if (((action & ACT_GROUP_MASK) == ACT_GROUP_CUTSCENE) != talking) {
@@ -386,14 +390,22 @@ static int replay(int window, const char* path) {
     } else if (opened >= 0) {
         printf("%s at frame %d, not %d%s\n", goal, opened, frames,
                opened < frames ? " (sm64_tool trim cuts the demo there)" : "");
+    } else if (spawned == frames) {
+        /* A demo from when the spawn was the goal: it stops where the star
+         * appears, and never takes it. */
+        printf("the star spawned at frame %d, as this demo says, and is not touched: the demo ends at the spawn\n",
+               spawned);
     } else {
         printf("never reached %s; Mario ended at (%.0f %.0f %.0f), %.0f units from it across the ground\n", goal,
                sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2),
                sm64_goal_distance(env, sm64_pos(env, 0), sm64_pos(env, 2)));
+        if (spawned >= 0) {
+            printf("  (a star spawned at frame %d)\n", spawned);
+        }
     }
     /* Watched, the episode's end is worth seeing too: the door swinging open, or
      * the star coming down and the dance. Five seconds more, with nothing held. */
-    if (window && opened >= 0) {
+    if (window && (opened >= 0 || spawned >= 0)) {
         n64gym_pad(&env->gym, 0, 0.0f, 0.0f);
         for (int k = 0; k < 75; k++) {
             n64gym_step(&env->gym, 2);
@@ -402,7 +414,7 @@ static int replay(int window, const char* path) {
     }
     puf_close(env);
     free(inputs);
-    return opened == frames ? 0 : 1;
+    return opened == frames || spawned == frames ? 0 : 1;
 }
 
 /* One frame of a recording: the picture the console's video interface would
@@ -462,7 +474,7 @@ static int record(const char* path, const char* out) {
     const char* goal = env->star ? "the star" : "the door";
     printf("%s: %d inputs, %d frames -> %s\n", path, count, frames, out);
     FILE* video = NULL;
-    int width = 0, height = 0, written = 0, frame = 0, opened = -1, ok = 1;
+    int width = 0, height = 0, written = 0, frame = 0, opened = -1, spawned = -1, ok = 1;
     for (int k = 0; k < count && opened < 0 && ok; k++) {
         n64gym_pad(&env->gym, inputs[k].buttons, inputs[k].stick_x, inputs[k].stick_y);
         for (int f = 0; f < inputs[k].frames && ok; f++) {
@@ -474,6 +486,9 @@ static int record(const char* path, const char* out) {
             ok = record_frame(env, &video, &width, &height, out);
             written += ok && video != NULL;
         }
+        if (spawned < 0 && sm64_star_spawning(env)) {
+            spawned = frame;
+        }
         if (sm64_goal_reached(env)) {
             opened = frame;
         }
@@ -482,11 +497,13 @@ static int record(const char* path, const char* out) {
         printf("%s at frame %d, as it should be\n", goal, opened);
     } else if (opened >= 0) {
         printf("%s at frame %d, not %d\n", goal, opened, frames);
+    } else if (spawned == frames) {
+        printf("the star spawned at frame %d, as this demo says: the demo ends at the spawn\n", spawned);
     } else {
         printf("never reached %s; Mario ended at (%.0f %.0f %.0f)\n", goal, sm64_pos(env, 0), sm64_pos(env, 1),
                sm64_pos(env, 2));
     }
-    if (opened >= 0 && ok) {
+    if ((opened >= 0 || spawned >= 0) && ok) {
         n64gym_pad(&env->gym, 0, 0.0f, 0.0f);
         for (int k = 0; k < 150 && ok; k++) {
             n64gym_step(&env->gym, 1);
@@ -504,7 +521,7 @@ static int record(const char* path, const char* out) {
     }
     puf_close(env);
     free(inputs);
-    return opened == frames && ok && status == 0 ? 0 : 1;
+    return (opened == frames || spawned == frames) && ok && status == 0 ? 0 : 1;
 }
 
 /* Cut each demo where the goal is reached, and write it back. For demos kept
