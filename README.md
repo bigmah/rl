@@ -18,7 +18,7 @@ Rewards: progress toward the flag (1.0 for the whole run), +1 for the flag, and 
 
 `envs/sm64/` is the real cartridge as an environment, and the goal is to **open the castle's front door as soon as possible**, starting from the castle grounds.
 
-The game is not emulated and not reimplemented. [N64Bundler](https://github.com/bigmah/n64bundler) statically recompiles `sm64.z64` into native arm64 and runs it in `n64b-run`; this env starts one of those per agent, in a process of its own, and reads Mario out of the console's memory — which is mapped into both processes, so an observation is a load rather than a request.
+The game is not emulated and not reimplemented. [N64Bundler](https://github.com/bigmah/n64bundler) statically recompiles `sm64.z64` into native code for the machine it is on and runs it in `n64b-run`; this env starts one of those per agent, in a process of its own, and reads Mario out of the console's memory — which is mapped into both processes, so an observation is a load rather than a request.
 
 - `sm64.h`: where the game keeps Mario, what an action does to the controller, the reward, and the `puf_*` functions PufferLib calls
 - `n64b_gym.h`: starting a game, stepping it, saving and loading its state
@@ -26,6 +26,7 @@ The game is not emulated and not reimplemented. [N64Bundler](https://github.com/
 - `sm64.ini`: env and training config, on top of PufferLib's `config/default.ini`
 
 ```sh
+cp ~/roms/sm64.z64 .  # your own dump of the cartridge (USA): the only thing this needs from you
 make sm64-state       # play through the intro once and save the castle grounds
 make ENV=sm64 train   # 8 copies of the game, ~9000 agent steps a second
 make sm64-watch       # watch the latest checkpoint play, in a window
@@ -43,7 +44,7 @@ make sm64-slide-robustify  # phase 2 on the slide: a policy that reaches the sta
 make sm64-slide-watch      # watch its most trained checkpoint go for the star
 ```
 
-It needs your own dump of the cartridge, recompiled once: drop `sm64.z64` on N64Bundler so it appears in its library as `NSME`. `build.sh` finds the recompiled game there. Set `N64BUNDLER` if that checkout is not at `../static_recomp/n64bundler`. No game data is copied into this repository, and everything derived from it lands in the gitignored `build/`.
+All it needs from you is your own dump of the cartridge, Super Mario 64 (USA): put it at `sm64.z64` in the top of the checkout, or point `SM64_ROM` at it. The first sm64 build fetches N64Bundler (a submodule at `vendor/n64bundler`), builds it, and recompiles the cartridge with it into `build/sm64/game/`: a few minutes for RT64, the renderer, and seconds for the game, once. Set `N64BUNDLER` to build against another checkout of it. No game data is copied into this repository, and everything derived from it lands in the gitignored `build/`.
 
 Every training result in the sections below came from the PufferLib 4.0 trainer, and `sm64.ini` is still tuned for it. 5.0 trains differently enough that those settings learn far more slowly: see *Against the 4.0 port*.
 
@@ -388,7 +389,7 @@ Not ported: continuous actions, action masks, multiple GPUs, self-play and sweep
 
 Where an env is fast, as platformer is, the matmul is what takes the time: this one does 1.5 to 2 TFLOPS, with no vendor's library under it, and a minibatch of 8,192 is 8.0 ms forward and back and 1.8 ms of Muon. Where the env is slow, as eight copies of a Nintendo 64 are, the trainer is waiting for it: what matters there is the way to the GPU and back, once a step, and a step of acting for eight agents is 0.22 ms against the 0.18 ms that a round trip with nothing to do costs. With an 80 by 60 picture it is 0.8 ms, and the games step 1,500 times a second either way. `make bench` measures all of this on the GPU it is run on.
 
-**What is and isn't portable.** The trainer is: it builds for Linux and Windows as it stands (`cargo check --target`), and nothing in it knows what GPU it has. It has only been *run* on Metal. `build.sh` knows macOS and Linux. The platformer is plain C and raylib. The sm64 env is POSIX (`shm_open`, `posix_spawn`, a socket pair), and the game under it is whatever N64Bundler recompiles it to, which today is arm64.
+**What is and isn't portable.** The trainer is: it builds for Linux and Windows as it stands (`cargo check --target`), and nothing in it knows what GPU it has. It has been run on Metal, and on Vulkan on arm64 Linux, where `make test` passes against the same golden numbers. `build.sh` knows macOS and Linux. The platformer is plain C and raylib. The sm64 env is POSIX (`shm_open`, `posix_spawn`, a socket pair), and the game under it is whatever N64Bundler recompiles it to: arm64 on a Mac, and the machine's own architecture on Linux. On arm64 Linux, from a fresh clone, the 674-frame slide record replays to the same frame it does on a Mac.
 
 Observations are uploaded as floats, so an env with `unsigned char` observations is converted on the CPU first; both envs here are float.
 
@@ -430,14 +431,31 @@ The first two never learned anything: entropy drifted *up* toward the 4.91 of a 
 
 ## Setup
 
-Rust ([rustup](https://rustup.rs)) and a C compiler. On a Mac, OpenMP too, which Apple's clang doesn't ship:
+Rust ([rustup](https://rustup.rs)) and a C compiler, then your own dump of Super Mario 64 (USA) for sm64. Nothing else has to be fetched or built by hand: every target builds the trainer, fetches the submodules it needs, and builds N64Bundler and recompiles the game the first time it is run.
+
+On a Mac, OpenMP too, which Apple's clang doesn't ship, and for sm64 cmake, ninja and Xcode, whose Metal toolchain compiles the renderer's shaders (Xcode 26 downloads it separately: `xcodebuild -downloadComponent MetalToolchain`, and the build says so if it is missing):
 
 ```sh
-brew install libomp   # macOS
-make setup            # git submodule update --init && cargo build --release
+brew install libomp cmake ninja
+cp ~/roms/sm64.z64 .
+make sm64-slide      # builds N64Bundler and the game the first time, then trains
 ```
 
-On Linux the C compiler's own OpenMP is used, and raylib wants the X11 and OpenGL headers (`libx11-dev libgl1-mesa-dev`, or what your distribution calls them). The sm64 build reads N64Bundler's library with `jq`, which macOS ships.
+On Linux (Debian and Ubuntu package names; run on arm64, and x86-64 is written for and has not been run):
+
+```sh
+sudo apt install build-essential clang cmake ninja-build git curl python3 libsdl2-dev \
+    libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev
+cp ~/roms/sm64.z64 .
+make sm64-slide
+```
+
+- **The trainer** runs on whatever Vulkan device there is. A machine with no GPU can still train on Mesa's CPU driver (`libvulkan1 mesa-vulkan-drivers`): the network is small and sm64 is bound by the games, so it is slower rather than stuck: 1,600 steps a second in an arm64 Linux VM on an M4 Pro, where macOS on the same machine does about 5,000 on Metal.
+- **The game** runs headless with no GPU at all: on Linux N64Bundler builds its host without RT64, the renderer (`--no-renderer`), so nothing needs a graphics driver or a shader compiler. A picture in the observation (`make sm64-picture`) and watching in a window (`make sm64-watch`) need the renderer: build with `SM64_RENDERER=1`, which wants `libvulkan-dev` as well.
+- **raylib**, which every env links because PufferLib's `pufferenv.h` includes it, releases no build for arm64 Linux, so `build.sh` builds it from source there: that is what the X11 and OpenGL headers are for.
+- **In a container**, give it more shared memory than Docker's default 64MB (`--shm-size=1g`): each game shares about 9MB of it with the env.
+
+`make setup` does the fetching and the trainer's build up front, if you would rather.
 
 ## Play, train, watch
 
@@ -452,6 +470,6 @@ Pass extra flags with `ARGS`, e.g. `make train ARGS="--train.total-timesteps 10_
 
 ## Build notes
 
-- `build.sh` stands in for PufferLib's build script, which compiles an env from its `ocean/` into the CUDA trainer or a CPU play binary. This compiles `vecenv.c` around an env from `envs/` into a library of its own instead, so envs build side by side. It links OpenMP (Homebrew's on a Mac), and raylib, which 5.0's `pufferenv.h` includes for every env and which it downloads (there is no Linux build of raylib for arm64: build it and set `RAYLIB`).
+- `build.sh` stands in for PufferLib's build script, which compiles an env from its `ocean/` into the CUDA trainer or a CPU play binary. This compiles `vecenv.c` around an env from `envs/` into a library of its own instead, so envs build side by side. It links OpenMP (Homebrew's on a Mac), and raylib, which 5.0's `pufferenv.h` includes for every env and which it downloads, or builds from source where raylib releases no build (arm64 Linux). `RAYLIB` names one that is already somewhere.
 - Configs stay beside their envs: the trainer reads `envs/<env>/<env>.ini` itself, over PufferLib's `default.ini`, and finds both from the directory it is run in, or from `PUFFERL_ROOT`.
 - The sm64 vecenv should step each game on a thread of its own, which is `num_threads` equal to `total_agents` in `sm64.ini`. A thread stepping a game spends its time waiting on a socket, so the usual rule of one thread per core would run the games one after another.

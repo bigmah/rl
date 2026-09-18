@@ -2,3 +2,7 @@
 	path = vendor/PufferLib
 	url = https://github.com/PufferAI/PufferLib.git
 	branch = 5.0
+[submodule "vendor/n64bundler"]
+	path = vendor/n64bundler
+	url = https://github.com/bigmah/n64bundler.git
+	ignore = dirty

@@ -7,7 +7,7 @@ ENV ?= platformer
 # The trainer (src/) runs on wgpu: Metal, Vulkan or DX12, whatever the machine has
 PUFFERL = ./target/release/pufferl
 
-# One-time: fetch the PufferLib submodule and build the trainer
+# One-time, and optional: fetch the submodules and build the trainer
 setup:
 	git submodule update --init
 	cargo build --release
@@ -43,8 +43,9 @@ eval: build
 	$(PUFFERL) eval $(ENV) latest $(ARGS)
 
 # --- Super Mario 64 ----------------------------------------------------------
-# The game itself comes from N64Bundler: drop your own sm64.z64 on it once so it
-# is recompiled, and set N64BUNDLER if the checkout is not ../static_recomp/n64bundler.
+# The game is your own sm64.z64, Super Mario 64 (USA), at the top of this checkout
+# or wherever SM64_ROM says. The first build fetches N64Bundler (vendor/n64bundler),
+# builds it and recompiles the game with it; N64BUNDLER names another checkout.
 
 sm64: trainer
 	./build.sh sm64
