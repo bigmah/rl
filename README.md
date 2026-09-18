@@ -2,7 +2,7 @@
 
 RL experiments with [PufferLib](https://github.com/PufferAI/PufferLib) 5.0, vendored as a git submodule at `vendor/PufferLib` (branch `5.0`).
 
-Two envs live here, written as PufferLib 5.0 C envs. `make ENV=<name> train` builds one into a vecenv library of its own and trains it on the Mac's GPU with `mlx_pufferl.py`, a port of PufferLib's CUDA trainer to MLX.
+Two envs live here, written as PufferLib 5.0 C envs. `make ENV=<name> train` builds one into a vecenv library of its own and trains it on the GPU the machine has, with a port of PufferLib's CUDA trainer to Rust and [wgpu](https://wgpu.rs) (`src/`): Metal on a Mac, Vulkan on Linux, DX12 on Windows. `mlx_pufferl.py` is the same trainer on MLX, for a Mac only, and `make TRAINER=mlx ...` uses it instead. The two read the same configs and each other's checkpoints.
 
 ## Platformer
 
@@ -345,6 +345,48 @@ On an M4 Pro (10 performance cores), headless, one agent step being two frames o
 
 Each game keeps more than a core busy — its own threads, and the renderer's — so throughput peaks around eight and falls off above it. A console runs this game at 30 frames a second; eight of these run it at 18 000.
 
+## Training on any GPU with wgpu
+
+PufferLib 5.0 trains with one CUDA program, which only an NVIDIA card runs, and `mlx_pufferl.py` with MLX, which only a Mac runs. `src/` is that trainer a third time, in Rust on [wgpu](https://wgpu.rs), which is Metal, Vulkan or DX12 depending on the machine, with every kernel written once in WGSL (`src/kernels/`):
+
+```sh
+cargo build --release
+./target/release/pufferl train platformer [--train.total-timesteps 20_000_000 ...]
+./target/release/pufferl eval platformer [latest | path/to/checkpoint.bin] [--headless]
+```
+
+The command line, the configs, the checkpoints, the logs and the dashboard are `mlx_pufferl.py`'s, which are 5.0's, and so is everything under *Training on the Mac GPU with MLX* below that isn't about MLX: the policy, PPO as 5.0 has it, Muon, `norm_adv`, `target_entropy`, `weight_decay`, and what isn't ported. `WGPU_BACKEND` and `WGPU_ADAPTER_NAME` pick a GPU, as they do for any wgpu program.
+
+**There is no autograd, as there is none in 5.0.** wgpu runs compute shaders and nothing else: no BLAS, no tensors, no gradients. But `algo.cu` has none either (it is about 35 CUDA kernels with their backward passes written out, and cuBLAS for the products), so this is the same shape: a kernel for each of those, and one matmul kernel in place of cuBLAS.
+- `matmul.wgsl`: a thread computes a 4 by 4 block of the result, so each step along the inner dimension is eight reads and sixteen products. A GPU thread is slow alone, about a tenth of a microsecond a step, so a long inner dimension is cut into chunks that run side by side and are summed after; that alone made the weight gradients, whose inner dimension is the 8,192 rows of a minibatch, five times faster. Matrices are views (an offset and two strides), so a transpose or a block of the flat weights costs nothing, and matrices of one shape multiply as a batch.
+- `scan_forward.wgsl` and `scan_backward.wgsl` are the MinGRU's Metal kernels from `mlx_pufferl.py` again, which are `algo.cu`'s. `mingru_step.wgsl` is the one step of it that acting takes.
+- `ppo_loss.wgsl` is `ppo_loss_compute`: the loss of each step and, in the same walk, its gradient with respect to the step's logits and value, which is where the backward pass starts. `ppo_pre.wgsl` and `advantage.wgsl` come before it, as `cache_imp_and_v` and `puff_advantage` do.
+- Muon is `muon_momentum.wgsl`, five Newton-Schulz steps of three products and a polynomial, and `muon_apply.wgsl`. The MinGRU's layers are one shape, so they are orthogonalized as one batch.
+- The picture's three convolutions are the matmul too: `im2col.wgsl` lays every place the kernel goes out as a row, so the convolution is a product with the weights and both its gradients are products, and `col2im.wgsl` gathers the way back. Written as loops over the picture instead, they were five times slower: a minibatch of 512 pictures was 88 ms and is 14.
+
+**Everything is built once.** Every shape is known when training starts, so every dispatch of an epoch is too: its pipeline, its buffers, and its parameters in a uniform buffer of its own. A step of acting is one list of dispatches and a minibatch is another, and running one is encoding the list again, which takes the CPU 0.2 ms for a minibatch's 146. The numbers that do change (the step of the rollout, the learning rate, the entropy coefficient) live in two small uniforms the kernels share. Every weight is in one buffer in a checkpoint's order and padding, so a checkpoint is that buffer written out; gradients and momentum are buffers laid out the same way, so the global gradient norm is one sum. Nothing is read back while training but the actions, once a step, and the eight loss statistics, once an epoch.
+
+**It is tested against the MLX trainer.** `make test`:
+- `tests/parity.rs`: a policy, a minibatch, and what `mlx_pufferl.py` makes of them (`tests/parity_dump.py` wrote them down, in `tests/golden/`): the loss statistics, every gradient, and the weights after one and two steps of Muon. Three cases: 5.0 as it is; everything a config can turn on (V-trace, `norm_adv`, weight decay, four action heads); and a picture through the convolutions. The Rust trainer agrees with MLX to four or five figures on all of it, which is what two orders of summing float32 leave, and the golden numbers are in the repository, so the test runs on a machine with no MLX.
+- `tests/rollout.rs`: acting and training are different kernels over the same policy, so a rollout trained on before the weights move has to come out exactly on-policy (KL 0, importance 1), across episode ends and carried state. And 20,000 agents shown the same observation have to take each action as often as the sampler says it drew it.
+- `tests/ops.rs`: the matmul and the sums against the CPU, over every way the trainer uses them.
+
+Checkpoints go both ways. `mlx_pufferl.py` plays a platformer checkpoint trained here to the flag in 99.6% of 2,051 episodes; this plays MLX's in 99.1% of 2,037, and a 4.0 port's `.npz` in all of 2,048.
+
+**How fast**, on an M4 Pro:
+
+| | wgpu | MLX |
+|---|---|---|
+| platformer, steps/s while training (1,024 agents) | 445K | 810K |
+| platformer, 20M steps: episodes reaching the flag, of 2,000 | 99.7% | 99.1% |
+| sm64, 120K steps with 8 games | 30.0 s | 30.6 s |
+
+Where an env is fast, as platformer is, the matmul is what takes the time: this one does 1.5 to 2 TFLOPS, with no vendor's library under it, and a minibatch of 8,192 is 8.0 ms forward and back and 1.8 ms of Muon. 20M steps of platformer are 45 seconds. Where the env is slow, as eight copies of a Nintendo 64 are, the trainer is waiting for it either way: what matters there is the way to the GPU and back, once a step, and a step of acting for eight agents is 0.22 ms against the 0.18 ms that a round trip with nothing to do costs. With an 80 by 60 picture it is 0.8 ms, and the games step 1,500 times a second either way. `make bench` measures all of this on the GPU it is run on.
+
+**What is and isn't portable.** The trainer is: it builds for Linux and Windows as it stands (`cargo check --target`), and nothing in it knows what GPU it has. It has only been *run* on Metal. `build.sh` knows macOS and Linux. The platformer is plain C and raylib. The sm64 env is POSIX (`shm_open`, `posix_spawn`, a socket pair), and the game under it is whatever N64Bundler recompiles it to, which today is arm64.
+
+Observations are uploaded as floats, so an env with `unsigned char` observations is converted on the CPU first; both envs here are float.
+
 ## Training on the Mac GPU with MLX
 
 PufferLib 5.0 trains with one CUDA program (`src/pufferl.cu` and `src/algo.cu`), which a Mac can't run. `mlx_pufferl.py` is that trainer in [MLX](https://github.com/ml-explore/mlx), so training runs on the Apple Silicon GPU:
@@ -407,25 +449,32 @@ Robustifying the slide made that a wall rather than a slope. With only the star 
 
 The first two never learned anything: entropy drifted *up* toward the 4.91 of a uniform policy, and the frontier sat where random play alone gets it. So `norm_adv = 1` in `[train]` normalizes each minibatch's advantages as 4.0 did. It is off in `sm64.ini` and `mlx_pufferl.py` has no other opinion, so the trainer stays 5.0's unless a run asks; `make sm64-slide-robustify` asks.
 
-## Setup (macOS, Apple Silicon)
+## Setup
+
+Rust ([rustup](https://rustup.rs)) and a C compiler. On a Mac, OpenMP too, which Apple's clang doesn't ship:
 
 ```sh
-brew install libomp uv
-make setup   # git submodule update --init && uv sync
+brew install libomp   # macOS
+make setup            # git submodule update --init && cargo build --release
 ```
+
+On Linux the C compiler's own OpenMP is used, and raylib wants the X11 and OpenGL headers (`libx11-dev libgl1-mesa-dev`, or what your distribution calls them).
+
+For the MLX trainer as well, on a Mac: `brew install uv` and `make setup-mlx`.
 
 ## Play, train, watch
 
 ```sh
 make play    # A/D move, W/Space jump, S drop through platforms, R restart, ESC quit
-make train   # MLX on the GPU; checkpoints go to checkpoints/platformer/
+make train   # on the GPU; checkpoints go to checkpoints/platformer/
 make eval    # watch the most trained checkpoint
+make test    # the trainer against the CPU, against itself, and against MLX's numbers
 ```
 
-Pass extra flags with `ARGS`, e.g. `make train ARGS="--train.total-timesteps 10_000_000"`, and pick the env with `ENV=sm64`.
+Pass extra flags with `ARGS`, e.g. `make train ARGS="--train.total-timesteps 10_000_000"`, pick the env with `ENV=sm64`, and the trainer with `TRAINER=mlx`. Every sm64 target below takes `TRAINER=mlx` too.
 
-## Mac build notes
+## Build notes
 
-- `build.sh` stands in for PufferLib's build script, which compiles an env from its `ocean/` into the CUDA trainer or a CPU play binary. This compiles `vecenv.c` around an env from `envs/` into a library of its own instead, so envs build side by side. It links Homebrew's OpenMP, and raylib, which 5.0's `pufferenv.h` includes for every env.
-- Configs stay beside their envs: `mlx_pufferl.py` reads `envs/<env>/<env>.ini` itself, over PufferLib's `default.ini`.
+- `build.sh` stands in for PufferLib's build script, which compiles an env from its `ocean/` into the CUDA trainer or a CPU play binary. This compiles `vecenv.c` around an env from `envs/` into a library of its own instead, so envs build side by side. It links OpenMP (Homebrew's on a Mac), and raylib, which 5.0's `pufferenv.h` includes for every env and which it downloads (there is no Linux build of raylib for arm64: build it and set `RAYLIB`).
+- Configs stay beside their envs: the trainers read `envs/<env>/<env>.ini` themselves, over PufferLib's `default.ini`. The Rust trainer finds both from the directory it is run in, or from `PUFFERL_ROOT`.
 - The sm64 vecenv should step each game on a thread of its own, which is `num_threads` equal to `total_agents` in `sm64.ini`. A thread stepping a game spends its time waiting on a socket, so the usual rule of one thread per core would run the games one after another.

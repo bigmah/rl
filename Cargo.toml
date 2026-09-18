@@ -1,0 +1,31 @@
+[package]
+name = "pufferl"
+version = "0.1.0"
+edition = "2021"
+description = "PufferLib 5.0's trainer on wgpu: Metal, Vulkan and DX12 from one program"
+
+[[bin]]
+name = "pufferl"
+path = "src/main.rs"
+
+[lib]
+name = "pufferl"
+path = "src/lib.rs"
+
+[dependencies]
+wgpu = "30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+libloading = "0.8"
+libc = "0.2"
+
+[lints.clippy]
+# A remainder reads as the arithmetic it is
+manual_is_multiple_of = "allow"
+
+[profile.release]
+opt-level = 3
+debug = 1
+
+[profile.dev]
+opt-level = 1

@@ -1,15 +1,17 @@
 #!/bin/bash
-# Build an env for PufferLib 5.0 on Apple Silicon.
+# Build an env for PufferLib 5.0, on a Mac or on Linux.
 #
 #   ./build.sh [platformer|sm64]
 #
-#       build/vecenv_<env>.dylib    the env in a vecenv, for mlx_pufferl.py to train on
+#       build/vecenv_<env>.dylib    the env in a vecenv, for the trainer to train on
+#                                   (.so on Linux)
 #       build/platformer            human play
 #       build/sm64_tool             savestates, watching, benchmarking
 #
 # PufferLib's own build.sh compiles an env from its ocean/ into the CUDA trainer,
-# which a Mac can't run, or into a CPU play binary. This compiles vecenv.c around
-# an env from envs/ into a library of its own instead, so envs build side by side.
+# which only an NVIDIA card runs, or into a CPU play binary. This compiles vecenv.c
+# around an env from envs/ into a library of its own instead, so envs build side
+# by side, and the trainer (src/, or mlx_pufferl.py) loads the one it is asked for.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -27,20 +29,43 @@ fi
 
 mkdir -p "$BUILD"
 
-# pufferenv.h includes raylib for every env, as it does in PufferLib's own build
-RAYLIB=$BUILD/raylib-5.5_macos
+# pufferenv.h includes raylib for every env, as it does in PufferLib's own build.
+# RAYLIB names one that is already somewhere, with its include/ and lib/.
+case "$(uname -s)" in
+    Darwin)
+        CC=${CC:-clang}
+        LIB_EXT=dylib
+        RAYLIB_RELEASE=raylib-5.5_macos
+        RAYLIB_SYSTEM=(-framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL)
+        # The vecenv steps envs on OpenMP threads, which Apple clang doesn't ship
+        OMP="$(brew --prefix libomp)"
+        if [ ! -f "$OMP/include/omp.h" ]; then
+            echo "OpenMP missing: run 'brew install libomp'" && exit 1
+        fi
+        OMP_FLAGS=(-Xpreprocessor -fopenmp -I"$OMP/include" -L"$OMP/lib" -lomp -Wl,-rpath,"$OMP/lib")
+        CORES=$(sysctl -n hw.ncpu)
+        ;;
+    Linux)
+        CC=${CC:-cc}
+        LIB_EXT=so
+        RAYLIB_RELEASE=raylib-5.5_linux_amd64
+        RAYLIB_SYSTEM=(-lGL -lpthread -ldl -lrt -lX11)
+        OMP_FLAGS=(-fopenmp)
+        CORES=$(getconf _NPROCESSORS_ONLN)
+        if [ -z "${RAYLIB:-}" ] && [ "$(uname -m)" != x86_64 ]; then
+            echo "raylib releases no Linux build for $(uname -m): build raylib 5.5 and set RAYLIB to it" && exit 1
+        fi
+        ;;
+    *)
+        echo "build.sh knows macOS and Linux, not $(uname -s)" && exit 1
+        ;;
+esac
+RAYLIB=${RAYLIB:-$BUILD/$RAYLIB_RELEASE}
 if [ ! -d "$RAYLIB" ]; then
     echo "Downloading raylib..."
-    curl -sL https://github.com/raysan5/raylib/releases/download/5.5/raylib-5.5_macos.tar.gz | tar xz -C "$BUILD"
+    curl -sL "https://github.com/raysan5/raylib/releases/download/5.5/$RAYLIB_RELEASE.tar.gz" | tar xz -C "$BUILD"
 fi
-RAYLIB_LIBS=("$RAYLIB/lib/libraylib.a" -framework Cocoa -framework IOKit -framework CoreVideo -framework OpenGL)
-
-# The vecenv steps envs on OpenMP threads, which Apple clang doesn't ship
-OMP="$(brew --prefix libomp)"
-if [ ! -f "$OMP/include/omp.h" ]; then
-    echo "OpenMP missing: run 'brew install libomp'" && exit 1
-fi
-OMP_FLAGS=(-Xpreprocessor -fopenmp -I"$OMP/include" -L"$OMP/lib" -lomp -Wl,-rpath,"$OMP/lib")
+RAYLIB_LIBS=("$RAYLIB/lib/libraylib.a" "${RAYLIB_SYSTEM[@]}")
 
 CFLAGS=(-O2 -Wall -DPLATFORM_DESKTOP -I"$PUFFER/src" -I"$RAYLIB/include" -I"$ENV_DIR")
 
@@ -63,12 +88,16 @@ if [ "$ENV" = sm64 ]; then
     fi
 
     echo "Building the game host (n64b-run)..."
-    cmake --build "$MR_BUILD" -j "$(sysctl -n hw.ncpu)" --target n64b-run >/dev/null
+    cmake --build "$MR_BUILD" -j "$CORES" --target n64b-run >/dev/null
 
     # Where the recompiled game and the cartridge it came from are. N64Bundler
     # writes both down when a ROM is added to its library; this only reads them.
     # No game data is copied here and none of it goes into git.
-    LIBRARY="$HOME/Library/Application Support/N64Bundler/library.json"
+    if [ "$(uname -s)" = Darwin ]; then
+        LIBRARY="$HOME/Library/Application Support/N64Bundler/library.json"
+    else
+        LIBRARY="${XDG_DATA_HOME:-$HOME/.local/share}/N64Bundler/library.json"
+    fi
     if [ -z "${SM64_MODULE:-}" ] || [ -z "${SM64_ROM:-}" ]; then
         if [ ! -f "$LIBRARY" ]; then
             echo "No N64Bundler library at $LIBRARY."
@@ -76,7 +105,7 @@ if [ "$ENV" = sm64 ]; then
             echo "or set SM64_MODULE and SM64_ROM yourself."
             exit 1
         fi
-        FOUND=$(/usr/bin/python3 -c '
+        FOUND=$(python3 -c '
 import json, sys
 library = json.load(open(sys.argv[1]))
 for game in library.get("games", []):
@@ -114,17 +143,17 @@ PATHS
 fi
 
 echo "Compiling the $ENV env..."
-clang -shared -fPIC -fvisibility=hidden "${CFLAGS[@]}" \
+"$CC" -shared -fPIC -fvisibility=hidden "${CFLAGS[@]}" \
     -DENV_HEADER="\"$ENV_DIR/$ENV.h\"" -DPUFFER_ENV_NAME="\"$ENV\"" \
-    vecenv.c "${RAYLIB_LIBS[@]}" "${OMP_FLAGS[@]}" -lm -o "$BUILD/vecenv_$ENV.dylib"
-echo "Built: $BUILD/vecenv_$ENV.dylib"
+    vecenv.c "${RAYLIB_LIBS[@]}" "${OMP_FLAGS[@]}" -lm -o "$BUILD/vecenv_$ENV.$LIB_EXT"
+echo "Built: $BUILD/vecenv_$ENV.$LIB_EXT"
 
 if [ "$ENV" = platformer ]; then
-    clang "${CFLAGS[@]}" "$ENV_DIR/$ENV.c" "${RAYLIB_LIBS[@]}" -lm -o "$BUILD/$ENV"
+    "$CC" "${CFLAGS[@]}" "$ENV_DIR/$ENV.c" "${RAYLIB_LIBS[@]}" -lm -o "$BUILD/$ENV"
     echo "Built: $BUILD/$ENV"
 fi
 
 if [ "$ENV" = sm64 ]; then
-    clang "${CFLAGS[@]}" "$ENV_DIR/$ENV.c" "${OMP_FLAGS[@]}" -lm -o "$BUILD/sm64_tool"
+    "$CC" "${CFLAGS[@]}" "$ENV_DIR/$ENV.c" "${OMP_FLAGS[@]}" -lm -o "$BUILD/sm64_tool"
     echo "Built: $BUILD/sm64_tool"
 fi

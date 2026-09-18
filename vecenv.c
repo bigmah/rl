@@ -1,13 +1,14 @@
-/* The vecenv mlx_pufferl.py trains on: PufferLib 5.0's CPU vecenv (env_setup and
+/* The vecenv the trainers train on: PufferLib 5.0's CPU vecenv (env_setup and
  * the worker loop in src/pufferl.cu) without the CUDA around it, built into a
- * shared library per env and driven from Python through ctypes.
+ * shared library per env, which the Rust trainer loads (src/vecenv.rs) and
+ * mlx_pufferl.py drives through ctypes.
  *
- *   ./build.sh platformer    ->  build/vecenv_platformer.dylib
+ *   ./build.sh platformer    ->  build/vecenv_platformer.dylib (.so on Linux)
  *
  * One buffer. Envs are made in order until there are total_agents agents, each
  * told its index in rng, and step together on num_threads OpenMP threads. The
  * observations, actions, rewards, terminals and action masks of every agent are
- * flat arrays that Python reads and writes in place.
+ * flat arrays that the trainer reads and writes in place.
  */
 
 #include <omp.h>

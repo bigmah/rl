@@ -1,15 +1,50 @@
-.PHONY: setup build play train eval sm64 sm64-state sm64-train sm64-watch sm64-demo sm64-bench sm64-explore sm64-robustify sm64-slide sm64-slide-explore sm64-slide-robustify sm64-slide-watch sm64-picture
+.PHONY: setup setup-mlx trainer test golden bench build play train eval sm64 sm64-state sm64-train sm64-watch sm64-demo sm64-bench sm64-explore sm64-robustify sm64-slide sm64-slide-explore sm64-slide-robustify sm64-slide-watch sm64-picture
 
 # Which env to build and train. Each builds into a library of its own
-# (build/vecenv_<env>.dylib), so building one leaves the others as they are.
+# (build/vecenv_<env>.dylib, or .so), so building one leaves the others as they are.
 ENV ?= platformer
 
-# One-time: fetch the PufferLib submodule and Python deps
+# Which trainer. The Rust one (src/) runs on wgpu: Metal, Vulkan or DX12, whatever
+# the machine has. TRAINER=mlx is mlx_pufferl.py, the same trainer on MLX, which is
+# faster on a Mac where the env is not what takes the time. They read and write the
+# same configs, checkpoints and logs.
+TRAINER ?= rust
+ifeq ($(TRAINER),mlx)
+PUFFERL = uv run python mlx_pufferl.py
+else
+PUFFERL = ./target/release/pufferl
+endif
+
+# One-time: fetch the PufferLib submodule and build the trainer
 setup:
 	git submodule update --init
+	cargo build --release
+
+# One-time, for TRAINER=mlx: Python and MLX
+setup-mlx:
 	uv sync
 
-build:
+trainer:
+ifneq ($(TRAINER),mlx)
+	cargo build --release
+endif
+
+# The kernels against the CPU, acting against training, and the whole of a training
+# step against the numbers mlx_pufferl.py gets (tests/golden, which `make golden`
+# rewrites from the MLX trainer)
+test:
+	cargo test --release
+
+golden:
+	uv run python tests/parity_dump.py
+
+# Where the time goes on this GPU, with no env
+bench:
+	cargo run --release --example bench_matmul
+	cargo run --release --example bench_train
+	cargo run --release --example bench_latency
+
+build: trainer
 	./build.sh $(ENV)
 
 # A/D move, W/Space jump, S drop through platforms, R restart, ESC quit
@@ -17,18 +52,19 @@ play: build
 	./build/platformer
 
 # Extra flags pass through, e.g. make train ARGS="--train.total-timesteps 10_000_000"
+# On the GPU: checkpoints go to checkpoints/<env>/
 train: build
-	uv run python mlx_pufferl.py train $(ENV) $(ARGS)
+	$(PUFFERL) train $(ENV) $(ARGS)
 
 # Watch the most trained checkpoint play one env (ESC to quit)
 eval: build
-	uv run python mlx_pufferl.py eval $(ENV) latest $(ARGS)
+	$(PUFFERL) eval $(ENV) latest $(ARGS)
 
 # --- Super Mario 64 ----------------------------------------------------------
 # The game itself comes from N64Bundler: drop your own sm64.z64 on it once so it
 # is recompiled, and set N64BUNDLER if the checkout is not ../static_recomp/n64bundler.
 
-sm64:
+sm64: trainer
 	./build.sh sm64
 
 # Play through the title, the file select and Peach's letter once, and save the
@@ -38,7 +74,7 @@ sm64-state: sm64
 	./build/sm64_tool state
 
 sm64-train: sm64 sm64-state
-	uv run python mlx_pufferl.py train sm64 $(ARGS)
+	$(PUFFERL) train sm64 $(ARGS)
 
 # Go-Explore's first phase with no policy: random play from the archive until it
 # has opened the door, keeping the fastest run in build/sm64/door.demo
@@ -50,7 +86,7 @@ sm64-explore: sm64
 # Entropy is bought at a fixed price rather than held at sm64.ini's target,
 # and the learning rate is a third of PufferLib's 0.015: see the README
 sm64-robustify: sm64
-	uv run python mlx_pufferl.py train sm64 --env.backward 0.8 --env.go-explore 0 \
+	$(PUFFERL) train sm64 --env.backward 0.8 --env.go-explore 0 \
 		--env.novelty 0 --env.novelty-episode 0 \
 		--train.target-entropy 0 --train.ent-coef 0.01 --train.learning-rate 0.005 $(ARGS)
 
@@ -66,7 +102,7 @@ sm64-robustify: sm64
 SLIDE = SM64_GOAL=star SM64_LEVEL=27
 SLIDE_ARGS = --env.respawn 1 --env.max-ticks 1500 --base.checkpoint-dir checkpoints/slide --base.log-dir logs/slide
 sm64-slide: sm64
-	$(SLIDE) uv run python mlx_pufferl.py train sm64 $(SLIDE_ARGS) $(ARGS)
+	$(SLIDE) $(PUFFERL) train sm64 $(SLIDE_ARGS) $(ARGS)
 
 # Go-Explore's first phase on the slide, with no policy: random sliding from the
 # archive until it has a star, keeping the fastest in build/sm64/star-level27-act0.demo
@@ -81,25 +117,25 @@ sm64-slide-explore: sm64
 # top at most, so the discount is 0.999 rather than 5.0's 0.995, at which a star
 # 400 frames off is worth a third. See the README.
 sm64-slide-robustify: sm64
-	$(SLIDE) uv run python mlx_pufferl.py train sm64 $(SLIDE_ARGS) --env.backward 0.8 --env.go-explore 0 \
+	$(SLIDE) $(PUFFERL) train sm64 $(SLIDE_ARGS) --env.backward 0.8 --env.go-explore 0 \
 		--env.novelty 0 --env.novelty-episode 0 \
 		--train.target-entropy 0 --train.ent-coef 0.005 --train.learning-rate 0.005 \
 		--train.norm-adv 1 --train.gamma 0.999 --train.gae-lambda 0.95 --train.minibatch-size 1024 $(ARGS)
 
 # Watch the slide's most trained checkpoint start at the top and go for the star
 sm64-slide-watch: sm64
-	$(SLIDE) uv run python mlx_pufferl.py eval sm64 latest $(SLIDE_ARGS) --env.window 1 --env.go-explore 0 \
+	$(SLIDE) $(PUFFERL) eval sm64 latest $(SLIDE_ARGS) --env.window 1 --env.go-explore 0 \
 		--env.novelty 0 --env.novelty-episode 0 $(ARGS)
 
 # Train with the policy looking at the game: an 80 by 60 picture of it in the
 # observation, through a small convolutional net. About a quarter of the speed.
 # Watch one with: make sm64-watch ARGS="--env.picture-width 80 --env.picture-height 60"
 sm64-picture: sm64
-	uv run python mlx_pufferl.py train sm64 --env.picture-width 80 --env.picture-height 60 $(ARGS)
+	$(PUFFERL) train sm64 --env.picture-width 80 --env.picture-height 60 $(ARGS)
 
 # Watch the most trained checkpoint play, in a window, at the speed a console ran
 sm64-watch: sm64
-	uv run python mlx_pufferl.py eval sm64 latest --env.window 1 --env.go-explore 0 $(ARGS)
+	$(PUFFERL) eval sm64 latest --env.window 1 --env.go-explore 0 $(ARGS)
 
 # The game with no policy at all: hold forward and jump, in a window
 sm64-demo: sm64

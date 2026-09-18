@@ -5,6 +5,9 @@ __pycache__/
 # build.sh output (raylib download, objects, human-play binary)
 build/
 
+# cargo's
+target/
+
 # puffer train output
 checkpoints/
 logs/
