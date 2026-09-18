@@ -11,7 +11,7 @@
 # PufferLib's own build.sh compiles an env from its ocean/ into the CUDA trainer,
 # which only an NVIDIA card runs, or into a CPU play binary. This compiles vecenv.c
 # around an env from envs/ into a library of its own instead, so envs build side
-# by side, and the trainer (src/, or mlx_pufferl.py) loads the one it is asked for.
+# by side, and the trainer (src/) loads the one it is asked for.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -105,15 +105,12 @@ if [ "$ENV" = sm64 ]; then
             echo "or set SM64_MODULE and SM64_ROM yourself."
             exit 1
         fi
-        FOUND=$(python3 -c '
-import json, sys
-library = json.load(open(sys.argv[1]))
-for game in library.get("games", []):
-    if game.get("game_id") == "NSME":
-        print(game.get("module", ""))
-        print(game.get("rom", ""))
-        break
-' "$LIBRARY")
+        if ! command -v jq >/dev/null; then
+            echo "Reading N64Bundler's library takes jq (macOS ships it; on Linux, install it),"
+            echo "or set SM64_MODULE and SM64_ROM yourself."
+            exit 1
+        fi
+        FOUND=$(jq -r 'first(.games[]? | select(.game_id == "NSME")) | .module // "", .rom // ""' "$LIBRARY")
         SM64_MODULE=${SM64_MODULE:-$(echo "$FOUND" | sed -n 1p)}
         SM64_ROM=${SM64_ROM:-$(echo "$FOUND" | sed -n 2p)}
     fi

@@ -2,10 +2,10 @@
 // numbers under it in the order a weight's are, (ky, kx, in), so that the convolution is
 // cols times the weights' transpose and its gradients are products too.
 //
-// Pictures are rows from the top with channels last, and a weight is (out, ky, kx, in):
-// MLX's layout, so a checkpoint means the same thing to both trainers. The input is a
-// view: each row of it is in_stride numbers, with the picture in_off into the row, which
-// is how the first convolution reads the picture at the end of an observation.
+// Pictures are rows from the top with channels last, and a weight is (out, ky, kx, in),
+// the layout picture checkpoints already have. The input is a view: each row of it is
+// in_stride numbers, with the picture in_off into the row, which is how the first
+// convolution reads the picture at the end of an observation.
 
 struct P {
     n: u32, gx: u32,

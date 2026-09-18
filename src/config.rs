@@ -39,7 +39,7 @@ fn strip_comment(line: &str) -> &str {
 
 fn parse_float(raw: &str) -> Option<f64> {
     let cleaned: String = raw.chars().filter(|ch| *ch != '_' && !ch.is_whitespace()).collect();
-    // Rust reads "infinity" and "nan" as Python does, but not a bare sign or an empty string
+    // Takes "infinity" and "nan", but not a bare sign or an empty string
     cleaned.parse::<f64>().ok()
 }
 

@@ -2,7 +2,7 @@
 //! padded to a multiple of 8 numbers as the CUDA trainer's allocator lays them out, in the
 //! order weights_create registers them: the encoder, the decoder, then the MinGRU. That is
 //! the layout of the model's weight buffer, so PufferLib's own CPU eval (src/puffercpu.c)
-//! and mlx_pufferl.py read what this writes, and this reads theirs.
+//! reads what this writes.
 
 use std::fs;
 use std::path::{Path, PathBuf};

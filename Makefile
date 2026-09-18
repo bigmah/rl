@@ -1,42 +1,24 @@
-.PHONY: setup setup-mlx trainer test golden bench build play train eval sm64 sm64-state sm64-train sm64-watch sm64-demo sm64-bench sm64-explore sm64-robustify sm64-slide sm64-slide-explore sm64-slide-robustify sm64-slide-watch sm64-picture
+.PHONY: setup trainer test bench build play train eval sm64 sm64-state sm64-train sm64-watch sm64-demo sm64-bench sm64-explore sm64-robustify sm64-slide sm64-slide-explore sm64-slide-robustify sm64-slide-watch sm64-picture
 
 # Which env to build and train. Each builds into a library of its own
 # (build/vecenv_<env>.dylib, or .so), so building one leaves the others as they are.
 ENV ?= platformer
 
-# Which trainer. The Rust one (src/) runs on wgpu: Metal, Vulkan or DX12, whatever
-# the machine has. TRAINER=mlx is mlx_pufferl.py, the same trainer on MLX, which is
-# faster on a Mac where the env is not what takes the time. They read and write the
-# same configs, checkpoints and logs.
-TRAINER ?= rust
-ifeq ($(TRAINER),mlx)
-PUFFERL = uv run python mlx_pufferl.py
-else
+# The trainer (src/) runs on wgpu: Metal, Vulkan or DX12, whatever the machine has
 PUFFERL = ./target/release/pufferl
-endif
 
 # One-time: fetch the PufferLib submodule and build the trainer
 setup:
 	git submodule update --init
 	cargo build --release
 
-# One-time, for TRAINER=mlx: Python and MLX
-setup-mlx:
-	uv sync
-
 trainer:
-ifneq ($(TRAINER),mlx)
 	cargo build --release
-endif
 
 # The kernels against the CPU, acting against training, and the whole of a training
-# step against the numbers mlx_pufferl.py gets (tests/golden, which `make golden`
-# rewrites from the MLX trainer)
+# step against golden numbers (tests/golden)
 test:
 	cargo test --release
-
-golden:
-	uv run python tests/parity_dump.py
 
 # Where the time goes on this GPU, with no env
 bench:

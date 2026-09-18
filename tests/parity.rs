@@ -1,6 +1,8 @@
-//! The Rust trainer against the MLX one, on the numbers tests/parity_dump.py wrote down:
-//! the same policy and the same minibatch have to give the same loss, the same gradients,
-//! and the same weights after Muon has stepped.
+//! The trainer against golden numbers in tests/golden: the same policy and the same
+//! minibatch have to give the same loss, the same gradients, and the same weights after
+//! Muon has stepped. They were written by an MLX port of 5.0's trainer, whose gradients
+//! came from autograd rather than by hand, and which is no longer in the repository: a
+//! change to what the trainer computes, rather than how, leaves nothing to rewrite them.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -66,7 +68,7 @@ fn run(case: &str) {
     println!("{case} on {} ({:?})", gpu.info.name, gpu.info.backend);
     let model = Model::new(gpu.clone(), shapes, 0);
     let weights = floats(&dir, "weights.bin");
-    assert_eq!(weights.len(), model.flat_len, "a checkpoint from MLX is laid out as the weights are here");
+    assert_eq!(weights.len(), model.flat_len, "the golden weights are laid out as the weights are here");
     model.write_weights(&weights);
 
     // The minibatch is the whole rollout: one segment for every agent
@@ -87,7 +89,7 @@ fn run(case: &str) {
 
     for step in 1.. {
         if !dir.join(format!("stats{step}.bin")).exists() {
-            assert!(step > 1, "no golden numbers for {case}: run tests/parity_dump.py");
+            assert!(step > 1, "no golden numbers for {case}");
             break;
         }
         println!(" step {step}");

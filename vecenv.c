@@ -1,7 +1,6 @@
-/* The vecenv the trainers train on: PufferLib 5.0's CPU vecenv (env_setup and
+/* The vecenv the trainer trains on: PufferLib 5.0's CPU vecenv (env_setup and
  * the worker loop in src/pufferl.cu) without the CUDA around it, built into a
- * shared library per env, which the Rust trainer loads (src/vecenv.rs) and
- * mlx_pufferl.py drives through ctypes.
+ * shared library per env, which the trainer loads (src/vecenv.rs).
  *
  *   ./build.sh platformer    ->  build/vecenv_platformer.dylib (.so on Linux)
  *

@@ -8,7 +8,7 @@ the first hour gave 4 then 10, and the second gave 62 in a single stretch once
 the long flight landed. This is how to run the next one.
 
 The runs below need `go_explore_seed`, `ghost` and `ent_coef_damping`, which
-are in `sm64.h`, `sm64.ini` and `mlx_pufferl.py` as of commit 0786a3d.
+are in `sm64.h`, `sm64.ini` and the trainer (`src/`).
 
 ## One run
 
@@ -57,9 +57,9 @@ the frame counts, fastest first. Copy a new record out to a scratch directory
 as soon as it appears -- the folder keeps only ten, and a good line can be
 pushed out by a later family.
 
-To stop a run early: `kill -INT -- -$(ps -o pgid= -p $(pgrep -f "uv run python mlx_pufferl.py train sm64" | head -1) | tr -d ' ')`.
-That is the process group of the `uv` process; killing the Python alone leaves
-eight games running. A run stopped this way writes no log.
+To stop a run early: `kill -INT -- -$(ps -o pgid= -p $(pgrep -f "target/release/pufferl train sm64" | head -1) | tr -d ' ')`.
+That is the trainer's process group, which the eight games are in too. A run
+stopped this way writes no log.
 
 ## When it beats the record
 

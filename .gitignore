@@ -1,5 +1,3 @@
-.venv/
-__pycache__/
 .DS_Store
 
 # build.sh output (raylib download, objects, human-play binary)
@@ -11,4 +9,3 @@ target/
 # puffer train output
 checkpoints/
 logs/
-wandb/
