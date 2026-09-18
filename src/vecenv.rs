@@ -25,6 +25,23 @@ pub struct VecEnv {
     terminals: *const f32,
 }
 
+/// Open the env's library for good. It steps envs on OpenMP threads, which outlive every
+/// call into it and wait between calls inside the OpenMP runtime the library brought in.
+/// Unloading the library as the trainer exits unloads that runtime under them, and the
+/// first to wake returns into memory that is gone: with GCC's libgomp on Linux, a
+/// segfault at the end of about one run in ten. RTLD_NODELETE keeps it mapped until the
+/// process ends, which is when its threads do. The rest are libloading's own flags.
+#[cfg(unix)]
+unsafe fn open(path: &Path) -> Result<Library, libloading::Error> {
+    let flags = libc::RTLD_LAZY | libc::RTLD_LOCAL | libc::RTLD_NODELETE;
+    libloading::os::unix::Library::open(Some(path), flags).map(Library::from)
+}
+
+#[cfg(not(unix))]
+unsafe fn open(path: &Path) -> Result<Library, libloading::Error> {
+    Library::new(path)
+}
+
 pub fn library_name(env_name: &str) -> String {
     let extension = if cfg!(target_os = "macos") { "dylib" } else if cfg!(windows) { "dll" } else { "so" };
     format!("vecenv_{env_name}.{extension}")
@@ -37,7 +54,7 @@ impl VecEnv {
             crate::fail(&format!("{} not found: run ./build.sh {env_name}", path.display()));
         }
         // The library is an env someone compiled to be trained on; loading it runs it
-        let lib = unsafe { Library::new(&path) }.unwrap_or_else(|e| crate::fail(&format!("{}: {e}", path.display())));
+        let lib = unsafe { open(&path) }.unwrap_or_else(|e| crate::fail(&format!("{}: {e}", path.display())));
 
         let keys: Vec<CString> = env_config.iter().map(|(k, _)| CString::new(k.as_str()).unwrap()).collect();
         let values: Vec<CString> = env_config.iter().map(|(_, v)| CString::new(v.as_str()).unwrap()).collect();
