@@ -76,7 +76,14 @@ stopped this way writes no log.
 cp build/sm64/pss-2/fastest.demo demos/peach-slide/star-NNN-touch.demo
 SM64_TRACE=30 ./build/sm64_tool replay demos/peach-slide/star-NNN-touch.demo --env.star pss-2 > demos/peach-slide/route-NNN-touch.txt
 ./build/sm64_tool record demos/peach-slide/star-NNN-touch.demo demos/peach-slide/star-NNN-touch.mp4 --env.star pss-2
+ffmpeg -i demos/peach-slide/star-NNN-touch.mp4 -vf "fps=15,scale=480:-1:flags=lanczos" \
+  -c:v libwebp_anim -q:v 50 -compression_level 6 -loop 0 -an demos/peach-slide/star-NNN-touch.webp
 ```
+
+The last of those is the copy that plays at the top of the top-level README,
+which shows the record: point its `<img>` and link at the new files. It takes
+ffmpeg a few minutes. WebP rather than GIF because of the size: the WebP is
+3.7 MB, a third of the mp4, where a GIF at only 320 pixels came to 13 MB.
 
 Do this after the run ends, not during: the tools write into the same
 `build/sm64/pss-2` files the run does. Compare the trace with `route-674-touch.txt`

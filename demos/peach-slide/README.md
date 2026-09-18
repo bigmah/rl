@@ -115,7 +115,9 @@ from the top of the slide.
 
 `star-674-touch.demo` is the fastest touch on record: the star is his on frame
 674, 22.5 seconds from the savestate, in 337 inputs. `star-674-touch.mp4` is its
-video and `route-674-touch.txt` its trace. It came in the second of two
+video and `route-674-touch.txt` its trace. `star-674-touch.webp` is the same
+video at 480 pixels and fifteen frames a second, which is what plays at the top
+of the top-level README (`NEXT.md` has the command that makes it). It came in the second of two
 back-to-back hours of `make sm64-slide` on 2026-09-17 evening, both with the
 archive seeded from the runs on file and the ghost paying, each loading the last
 checkpoint of the one before. The first hour took the record 750 to 746 to 736;
