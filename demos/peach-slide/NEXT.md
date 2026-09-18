@@ -10,14 +10,22 @@ the long flight landed. This is how to run the next one.
 The runs below need `go_explore_seed`, `ghost` and `ent_coef_damping`, which
 are in `sm64.h`, `sm64.ini` and the trainer (`src/`).
 
+Found on 2026-09-18, and worth knowing before the next run: the star every run
+here takes is **the slide's second, for reaching the bottom inside 21 seconds**
+of the HUD timer, which starts when the sliding does. Reach the bottom slower
+and no star appears at all. So an episode from the top pays nothing until it
+is already fast -- which may be much of why no run has ever taken it from the
+top -- and the env calls this star `pss-2`. `pss-1`, the box, is a different
+goal that no run has.
+
 ## One run
 
 ```sh
-LAST=$(ls -t checkpoints/slide/sm64 | head -1)
-CKPT=checkpoints/slide/sm64/$LAST/$(ls checkpoints/slide/sm64/$LAST | tail -1)
-make sm64-slide ARGS="--env.novelty-episode 0 --train.norm-adv 1 \
+LAST=$(ls -t checkpoints/pss-2/sm64 | head -1)
+CKPT=checkpoints/pss-2/sm64/$LAST/$(ls checkpoints/pss-2/sm64/$LAST | tail -1)
+make sm64-train STAR=pss-2 ARGS="--env.novelty-episode 0 --train.norm-adv 1 \
   --train.learning-rate 0.005 --train.ent-coef 0.007 --train.ent-coef-rate 0.0025 \
-  --train.ent-coef-damping 0.5 --env.go-explore 0.9 --env.go-explore-door 0.75 \
+  --train.ent-coef-damping 0.5 --env.go-explore 0.9 --env.go-explore-star 0.75 \
   --env.go-explore-seed 1 --env.ghost 0.02 --train.total-timesteps 12_000_000 \
   --base.load-model-path $CKPT"
 ```
@@ -26,14 +34,14 @@ make sm64-slide ARGS="--env.novelty-episode 0 --train.norm-adv 1 \
   3.4K steps a second averaged over the hour, dipping to 2.5K and touching 4.6K;
   at 2.5K, 12M would take 80 minutes, so size `total-timesteps` off the rate you
   see if the run has to fit a window. The run ends by itself and writes
-  `logs/slide/sm64/<run id>.ini`.
+  `logs/pss-2/sm64/<run id>.ini`.
 - It loads the last run's last checkpoint. The first line it prints after the
-  build should be `sm64: the archive starts with N cubes ... from 12 runs on
-  file`: the touch demo, the ten in `build/sm64/star-level27-act0-touch-fastest/`,
-  and the 770 in `build/sm64/star-level27-act0-touch-seeds/`. N fell from 206 to
+  build should be `sm64: the archive starts with N cubes ... from 13 runs on
+  file`: the touch demo, the ten in `build/sm64/pss-2/fastest/`,
+  and the 770 and 750 in `build/sm64/pss-2/seeds/`. N fell from 206 to
   169 between the two runs as the lines got shorter; a smaller archive is not a
   worse one.
-- Every touch faster than the demo becomes `build/sm64/star-level27-act0-touch.demo`
+- Every touch faster than the demo becomes `build/sm64/pss-2/fastest.demo`
   on its own, and the ten fastest stay in the folder, so the next run is
   seeded with this run's best. Nothing has to be copied between runs.
 
@@ -52,7 +60,7 @@ Watch three numbers on the dashboard:
   every check of both hours, including the twenty minutes that found 62 frames,
   so it is a poor progress signal at this point; the file names are the signal.
 
-And the file names in `build/sm64/star-level27-act0-touch-fastest/`: they are
+And the file names in `build/sm64/pss-2/fastest/`: they are
 the frame counts, fastest first. Copy a new record out to a scratch directory
 as soon as it appears -- the folder keeps only ten, and a good line can be
 pushed out by a later family.
@@ -64,14 +72,14 @@ stopped this way writes no log.
 ## When it beats the record
 
 ```sh
-SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay build/sm64/star-level27-act0-touch.demo
-cp build/sm64/star-level27-act0-touch.demo demos/peach-slide/star-NNN-touch.demo
-SM64_GOAL=star SM64_LEVEL=27 SM64_TRACE=30 ./build/sm64_tool replay demos/peach-slide/star-NNN-touch.demo > demos/peach-slide/route-NNN-touch.txt
-SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool record demos/peach-slide/star-NNN-touch.demo demos/peach-slide/star-NNN-touch.mp4
+./build/sm64_tool replay --env.star pss-2
+cp build/sm64/pss-2/fastest.demo demos/peach-slide/star-NNN-touch.demo
+SM64_TRACE=30 ./build/sm64_tool replay demos/peach-slide/star-NNN-touch.demo --env.star pss-2 > demos/peach-slide/route-NNN-touch.txt
+./build/sm64_tool record demos/peach-slide/star-NNN-touch.demo demos/peach-slide/star-NNN-touch.mp4 --env.star pss-2
 ```
 
 Do this after the run ends, not during: the tools write into the same
-`build/sm64` files the run does. Compare the trace with `route-674-touch.txt`
+`build/sm64/pss-2` files the run does. Compare the trace with `route-674-touch.txt`
 to see where the frames came from, and add a section to `README.md` here.
 `SM64_TRACE=5` is the one to use for finding the exact jump and landing frames.
 
@@ -96,7 +104,7 @@ fixed, so everything left is getting to the box sooner than 541.
   seconds, so the height for it is there.
 - **Keep old lines in play.** The fastest folder keeps only the ten fastest and
   is now all 674-family; the 750 and 736 are already out of it. A run whose line
-  is worth keeping goes in `build/sm64/star-level27-act0-touch-seeds/`; seeding
+  is worth keeping goes in `build/sm64/pss-2/seeds/`; seeding
   reads every `.demo` there as well. The 770 is in there now, and its long
   flight has been superseded by the 674's -- it can come out if the seeds folder
   starts costing more than it gives.

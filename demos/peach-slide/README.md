@@ -1,7 +1,7 @@
 # Peach's Secret Slide in 648 frames
 
 `star-648.demo` is the fastest star on record here for Peach's Secret Slide
-(`SM64_LEVEL=27`): the pad inputs that take Mario from the course savestate to
+(`pss-2`): the pad inputs that take Mario from the course savestate to
 the star's spawn in 648 frames, 21.6 seconds at the game's thirty a second. The
 game is deterministic, so playing the inputs back spawns the star on the same
 frame every time.
@@ -10,8 +10,16 @@ It was found when the spawn was the goal, so it ends there: the star comes down
 and Mario does not go and take it. The goal has since become the touch, and the
 tool reports this demo as "the star spawned at frame 648, as this demo says".
 
-It is kept here because the copy the tools use, `build/sm64/star-level27-act0.demo`,
+It is kept here because the copy the tools use, `build/sm64/pss-2/fastest.demo`,
 is overwritten by any run that finds a faster star. This one stays as it is.
+
+**Every run here takes the slide's second star**, the one for reaching the
+bottom inside 21 seconds of the slide's own timer, not the box: the save file's
+flag for it is what goes on, the HUD timer stops at 564 frames (18.8 seconds) on
+the 786, and the same route with the timer set past 21 seconds spawns no star at
+all. The kick or ground pound at the bottom is not what earns it. So the env
+calls this star `pss-2`, and a run slower than 21 seconds down the slide gets
+nothing. See *When a star is won, and which* in the top-level README.
 
 `star-648.mp4` is the same run as a video: every frame the console showed, at
 thirty a second, from the savestate to the star's spawn and five seconds beyond
@@ -38,7 +46,7 @@ which no run can shorten, and the rest the jump to where the star lands.
 `star-770-touch.demo` was the fastest touch on record until the 768 below: the star is his on frame
 770, 25.7 seconds from the savestate. `star-770-touch.mp4` is its video and
 `route-770-touch.txt` its trace. It was found later on 2026-09-17, fifteen
-minutes into thirty of `make sm64-slide` with the touch as the reward, the same
+minutes into thirty of `make sm64-slide` (now `make sm64-train STAR=pss-2`) with the touch as the reward, the same
 changes from the target as under "How it was found" below but 7M steps, and
 `load_model_path` the checkpoint the 786 came from. The archive starts empty in
 every run, so nothing of the 786 was handed to it: this is a run put together
@@ -54,7 +62,7 @@ lower track and is in the box by about frame 632, where the 786 took 648. The
 together yet.
 
 The same run found touches of 776, 778, 780 and 780; they are in
-`build/sm64/star-level27-act0-touch-fastest/`. Like every star before them, all
+`build/sm64/pss-2/fastest/`. Like every star before them, all
 of its touches began from an archive start partway down: of about 4,600
 episodes that began at the top of the slide, none touched the star.
 
@@ -145,29 +153,29 @@ Everything below applies to these the same way, with the file name in place of
 
 The game has to be set up first as the top-level README describes: N64Bundler
 with your own `sm64.z64`, then `make sm64` to build `build/sm64_tool`. The first
-star run on this course plays through the intro once to make the course savestate
-(`build/sm64/star-level27-act0.state`), which takes a few seconds and happens on
-its own.
+run on this star plays through the intro once to make the course savestate
+(`build/sm64/pss-2/start.state`), which takes a few seconds and happens on its
+own.
 
 Watch it in a window, at the speed a console ran it, with five seconds after the
 spawn so the star comes down:
 
 ```sh
-SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay watch demos/peach-slide/star-648.demo
+./build/sm64_tool replay watch demos/peach-slide/star-648.demo --env.star pss-2
 ```
 
 Check it without a window. This replays at about three times speed and confirms
 the star spawns on frame 648:
 
 ```sh
-SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay demos/peach-slide/star-648.demo
+./build/sm64_tool replay demos/peach-slide/star-648.demo --env.star pss-2
 ```
 
 Print where Mario is every thirty frames on the way, which is what `route.txt`
 is (`SM64_TRACE` works with `watch` too):
 
 ```sh
-SM64_GOAL=star SM64_LEVEL=27 SM64_TRACE=30 ./build/sm64_tool replay demos/peach-slide/star-648.demo
+SM64_TRACE=30 ./build/sm64_tool replay demos/peach-slide/star-648.demo --env.star pss-2
 ```
 
 Make the video again, or one of another demo. This plays the demo headless with
@@ -175,12 +183,12 @@ the game drawing every frame and hands them to `ffmpeg`, which has to be on the
 path (`brew install ffmpeg`):
 
 ```sh
-SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool record demos/peach-slide/star-648.demo demos/peach-slide/star-648.mp4
+./build/sm64_tool record demos/peach-slide/star-648.demo demos/peach-slide/star-648.mp4 --env.star pss-2
 ```
 
-`SM64_GOAL` and `SM64_LEVEL` are what tell the tool to load the course savestate
-rather than the castle grounds. Without them the inputs play on the grounds and
-mean nothing.
+`--env.star pss-2` is what tells the tool to load the slide's savestate. It is
+the star `sm64.ini` names, so it can be left off while that stays so; with
+another star the inputs play in another course and mean nothing.
 
 ## The route
 

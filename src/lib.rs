@@ -12,8 +12,8 @@
 //! that this loads:
 //!
 //! ```text
-//! pufferl train platformer [--section.key=value ...]
-//! pufferl eval platformer [latest | MODEL.bin] [--headless] [--section.key=value ...]
+//! pufferl train platformer [--config FILE ...] [--section.key=value ...]
+//! pufferl eval platformer [latest | MODEL.bin] [--headless] [--config FILE ...] [--section.key=value ...]
 //! ```
 
 pub mod actor;

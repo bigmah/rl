@@ -1,29 +1,37 @@
-/* Super Mario 64: open the castle's front door as soon as Mario can.
+/* Super Mario 64: get one star as soon as Mario can.
  *
  * The game is the real cartridge, statically recompiled to native arm64 by
  * N64Bundler and run in a process of its own (see n64b_gym.h). This file is the
- * environment around it: what an action does to the controller, what Mario's
- * state is worth, and where all of that lives in the console's memory.
+ * environment around it: which star, how Mario gets to its course, what an
+ * action does to the controller, what his state is worth, and where all of that
+ * lives in the console's memory.
  *
- * Reward is the door, the clock, and novelty. The door pays DOOR_REWARD and
- * ends the episode the frame it starts to open. Every frame costs
- * time_penalty / max_ticks, so an episode that runs out of time has paid
- * time_penalty in all. Nothing tells the policy where the door is or pays for
- * getting nearer to it: it sees what Mario is doing and where he is, and
- * finds out about the door by opening it.
+ * Which star is config. `star` in [env] names it the way the game numbers a
+ * course's stars: pss-2 is Peach's Secret Slide's second, wf-1 is Whomp's
+ * Fortress's first, and a course alone, bob, is any star in it (see the
+ * courses). Episodes start where the course's painting drops Mario, entered for
+ * the star's act, from a savestate made the first time that star is asked for
+ * (see getting there). Everything a star keeps -- that savestate, the fastest
+ * runs to it, the runs that seed the archive -- is in a folder of its own,
+ * build/sm64/<star>/.
  *
- * The door is a long way to find by accident: 7600 units in a straight line,
- * past a moat, over a bridge and through one of Lakitu's speeches, then walked
- * into rather than dived at. 400 episodes of random buttons never opened it,
- * and only one got as far as Lakitu. With the door and the clock alone, every
- * episode is worth exactly -time_penalty until the first door, and 12M steps
- * of training never found it: entropy stayed at its maximum, and the typical
- * episode ended as far from the door as it began. Nothing in that setup
- * remembers where Mario has been, so exploring is jittering the stick.
+ * Reward is the star, the clock, and novelty. The star pays STAR_REWARD and ends
+ * the episode the frame Mario touches it: that star and no other, by its flag
+ * going on in the save file. Every frame costs time_penalty / max_ticks, so an
+ * episode that runs out of time has paid time_penalty in all. Nothing tells the
+ * policy where the star is or pays for getting nearer to it: it sees what Mario
+ * is doing and where he is, and finds out about the star by taking it.
  *
- * Novelty is that memory, and it knows nothing about the door. The castle
- * grounds are cut into cubes novelty_cell units a side. The first time in an
- * episode that Mario enters a cube, he is paid
+ * With the goal and the clock alone, every episode is worth exactly
+ * -time_penalty until the first success. When the goal was the castle's front
+ * door, which is this env's history, 12M steps of that never found it: entropy
+ * stayed at its maximum, and the typical episode ended as far from the door as
+ * it began. Nothing in that setup remembers where Mario has been, so exploring
+ * is jittering the stick.
+ *
+ * Novelty is that memory, and it knows nothing about the star. A course is cut
+ * into cubes novelty_cell units a side. The first time in an episode that Mario
+ * enters a cube, he is paid
  *
  *     novelty_episode + novelty / sqrt(n)
  *
@@ -36,21 +44,16 @@
  * reached pays all of it. On its own it found the door within 100K steps, and
  * then lost it: by 500K the cubes on the way had been entered thousands of
  * times, novelty had fallen from 0.7 an episode to 0.05, episodes drifted back
- * to the start, and in 5M steps the door opened about five times -- too rarely
- * for the policy to learn the bridge, Lakitu and the door from.
+ * to the start, and the door opened too rarely for the policy to learn the way.
  *
  * The first part never fades: an episode that covers ground is always worth
- * more than one that does not, so the far side of the grounds keeps being
- * reached, and with it the door. It is small. 0.02 a cube is about what
- * running costs in clock, so a run to the door -- fifteen cubes, the door, and
- * the clock left over -- is still worth more than wandering all episode.
+ * more than one that does not, so the far side of a course keeps being reached.
+ * It is small. 0.02 a cube is about what running costs in clock, so a run
+ * straight to the goal is still worth more than wandering all episode.
  *
- * Novelty with both parts did not get there either. By 10M steps its episodes
- * ranged 3000 to 7700 units from the start, and the door opened once in a
- * thousand. They swam: the moat wraps the castle, dozens of new cubes that
- * lead nowhere near the door, while the way to it is a bridge of two cubes
- * and then 250 frames of Lakitu with nothing new at all. Not one of eight
- * traced episodes met Lakitu.
+ * Novelty with both parts did not get to the door either: its episodes swam the
+ * moat, dozens of new cubes that lead nowhere, while the way to the door was a
+ * bridge of two cubes and then 250 frames of Lakitu with nothing new at all.
  *
  * So some episodes start further on (Go-Explore). Every cube any episode has
  * entered is kept in an archive with the shortest run of pad inputs, from the
@@ -60,39 +63,19 @@
  * megabytes. A go_explore share of episodes pick a cube, weighted to the ones
  * fewest episodes have entered, replay its inputs, and only then start the
  * clock. The rest start where the task does. The reward is the same either
- * way; only where some episodes begin has changed, and the log keeps the door
+ * way; only where some episodes begin has changed, and the log keeps the star
  * rate from the real start apart (start_perf / from_start).
  *
  * Exploring is Go-Explore's first phase, and what it finds is a way to the
- * door, not a policy that can open it from the start. Its second phase makes
- * one: every exploring run that opens the door offers its inputs to a demo file, which
+ * star, not a policy that can take it from the start. Its second phase makes
+ * one: every run that reaches the star offers its inputs to a demo file, which
  * keeps the fastest, and a `backward` share of episodes start on that demo,
- * moving back from the door as the policy learns (see the fastest door).
+ * moving back from the star as the policy learns (see the fastest run).
  *
- * A death, or a warp out of the castle grounds, pays for the rest of the
- * clock at once, so no episode is ever worth less than running it out, and
- * none worth more: stopping the clock early is not a way to lose less.
- *
- * Two things stand between a fast runner and the door, both measured in the
- * running game. The door opens only for a Mario who walks into it: a dive
- * bonks off it and a punch does nothing. And Lakitu stops him the first time
- * he steps onto the bridge, for about 250 frames of dialog even with A mashed.
- * The episode goes on through that and the clock keeps running.
- *
- * An earlier version also paid for closing the straight-line distance to the
- * door, and ended the episode in water so that distance could not lure Mario
- * into the moat. It opened the door in 92% of episodes after 3M steps. This
- * one is for finding out what that help was worth.
- *
- * Episodes start from a savestate of the castle grounds with Mario standing
- * outside the castle, so no episode spends its first thousand frames watching
- * Peach's letter. See sm64_make_state.
- *
- * SM64_GOAL=star swaps the door for a star in Bob-omb Battlefield: episodes
- * start where the painting drops Mario into the course, the star pays what the
- * door did and ends the episode the frame he touches it, and leaving the
- * course is the death. Everything else -- the clock, novelty, the archive, the
- * demo -- is the same code. See the star.
+ * A death, or a warp out of the course, pays for the rest of the clock at
+ * once, so no episode is ever worth less than running it out, and none worth
+ * more: stopping the clock early is not a way to lose less. With respawn on, a
+ * death puts the game back instead and the episode carries on.
  *
  * The observation is Mario's state read out of memory, and, with picture_width
  * set, the game's picture after it: the frame the console's video interface is
@@ -154,85 +137,44 @@ typedef float obs_t;
 #define MARIO_STATE_PTR 0x8032D93C
 #define CURR_LEVEL_NUM 0x8032DDF8 /* s16; 16 is the castle grounds */
 #define CURR_AREA_INDEX 0x8033BACA /* s16 */
-#define PLAYER1_CONTROLLER 0x8033AF90
-
-#define LEVEL_CASTLE 6 /* the inside, where the front door leads */
-#define LEVEL_CASTLE_GROUNDS 16
-
-/* The front door is two objects, its halves, at x -76 and 77, y 803, z -3155:
- * found by searching memory for positions in front of the castle, then
- * confirmed by walking into each. The left half is pushed and the right half
- * pulled, and either way the game warps to LEVEL_CASTLE about forty frames
- * later. */
-#define DOOR_X 0.0f
-#define DOOR_Z -3155.0f
-#define ACT_PULLING_DOOR 0x00001320
-#define ACT_PUSHING_DOOR 0x00001321
-/* As much as rewards are clipped to in a step: more would buy nothing. */
-#define DOOR_REWARD 1.0f
-
-/* --- the star ------------------------------------------------------------------
- *
- * Getting there. The castle grounds keep a warp node for each half of the
- * front door, {id, level, area, node} in one word: node 0 and 1 lead to the
- * castle's inside. Pointed at a course's node 0x0A instead, which is where its
- * painting puts Mario, the door takes him to that course the way a painting
- * does, act select and all.
- *
- * What counts. Any star: touching one raises M_NUM_STARS that frame. Nothing
- * says which star, where it is, or what makes it appear.
- *
- * Which course, and which act. SM64_LEVEL is the course -- 9 is Bob-omb
- * Battlefield, 24 is Whomp's Fortress, whose stars are out in the open to be
- * climbed to, and 27 is Peach's Secret Slide, where the star is at the bottom
- * of a slide and gravity does most of the work. A course's objects depend on
- * the act it was entered for, and the act select only offers what the save file
- * has, which for a new file is the first and nothing else. The act is a
- * halfword in memory, so SM64_ACT writes it over the selected one while the
- * course loads, before the level script spawns anything -- which is what
- * decides which star is there.
- *
- * A secret course -- the slides, and the ones behind the castle's other doors --
- * has no act select: there is one way in and one course, and the game keeps its
- * act at 0. So for one of those the act is left alone, nothing is written over
- * it, and A is not pressed on the way in.
- *
- * Only the goal moves: the clock, novelty, the archive and the demo are the
- * same, and nothing in the reward or the observation says where a star is.
- * STAR_X and STAR_Z are where Bob-omb Battlefield's act 1 star floats, for the
- * log's `closest` and nothing else; in any other course there is no such place
- * and `closest` is 0.
- */
-#define LEVEL_BOB 9
-#define LEVEL_WF 24                /* Whomp's Fortress */
-#define LEVEL_PSS 27               /* Peach's Secret Slide, which has no act select */
 #define CURR_COURSE_NUM 0x8033BAC6 /* s16; Bob-omb Battlefield is course 1 */
 #define CURR_ACT_NUM 0x8033BAC8    /* s16 */
-/* When the star is won. A star that a box or a boss lets out, or that the slide
- * awards for a time, is spawned: it stops time, plays its cutscene for about a
- * hundred frames while Mario stands frozen, and lands where he can take it. The
- * star is his the frame he touches it, by the star count going up, whether it
- * spawned this episode or was there already. For a while the spawn was the
- * goal, which took the frozen hundred frames out of every star and put the
- * reward on the hit that earned it; but a star that has spawned is not yet
- * won, and a policy that stops there has not taken it. The demos kept then end
- * at the spawn, and sm64_tool says so when it replays one, from
- * gTimeStopState: the halfword at 0x8033D482 -- found by diffing the console's
- * memory before and during the freeze; it is the one word that goes from 0 to
- * 0x4A and stays there -- and a spawning star sets it to ENABLED (2) |
- * MARIO_AND_DOORS (8), with ACTIVE (0x40) coming on as it takes hold. Nothing
- * else in a course sets MARIO_AND_DOORS: dialog sets DIALOG (4) instead, and
- * the doors that set it are in the castle. Touching a star that was already
- * there still counts, by the star count going up. */
+#define PLAYER1_CONTROLLER 0x8033AF90
+
+#define LEVEL_CASTLE_GROUNDS 16
+
+/* As much as rewards are clipped to in a step: more would buy nothing. */
+#define STAR_REWARD 1.0f
+
+/* Which stars are his: gSaveBuffer.files[0][0].courseStars, a byte a course
+ * (course 1 first), a bit a star (star 1 the lowest). The first file is the one
+ * the savestate opens. Found by snapshotting the console's memory before and
+ * after a touch: the save file starts at 0x80207700 with its signature at +0x34,
+ * and taking Peach's Secret Slide's star turns on bit 1 of the byte for course
+ * 19, the frame the star count goes up. */
+#define SAVE_FILE_COURSE_STARS 0x8020770C
+
+/* A star that a box or a boss lets out, or that the slide awards for a time, is
+ * spawned: it stops time, plays its cutscene for about a hundred frames while
+ * Mario stands frozen, and lands where he can take it. It is not the goal -- a
+ * star that has spawned is not yet his -- but sm64_tool says when one spawned
+ * in a run it replays, from gTimeStopState: the halfword at 0x8033D482, found
+ * by diffing the console's memory before and during the freeze. A spawning star
+ * sets it to ENABLED (2) | MARIO_AND_DOORS (8), with ACTIVE (0x40) coming on as
+ * it takes hold. Nothing else in a course sets MARIO_AND_DOORS: dialog sets
+ * DIALOG (4) instead, and the doors that set it are in the castle. */
 #define TIME_STOP_STATE 0x8033D482 /* s16 */
 #define TIME_STOP_MARIO_AND_DOORS 0x08
+
+/* The way into a course (see getting there): the castle grounds keep a warp
+ * node for each half of the front door, {id, level, area, node} in one word,
+ * leading to the castle's inside. Pointed at a course's PAINTING_NODE instead,
+ * the door takes Mario there the way a painting does, act select and all. */
 #define DOOR_WARP_NODE_LEFT 0x80196414
 #define DOOR_WARP_NODE_RIGHT 0x80196420
 #define DOOR_WARP_TO_CASTLE_LEFT 0x00060100 /* node 0 -> level 6, area 1, node 0 */
 #define DOOR_WARP_TO_CASTLE_RIGHT 0x01060101
 #define PAINTING_NODE 0x0A /* where a course's painting puts Mario, in every course */
-#define STAR_X 1550.0f
-#define STAR_Z 300.0f
 
 /* struct MarioState */
 #define M_INPUT 0x02   /* u16 */
@@ -250,7 +192,6 @@ typedef float obs_t;
 #define M_CEIL_HEIGHT 0x6C
 #define M_FLOOR_HEIGHT 0x70
 #define M_WATER_LEVEL 0x76 /* s16 */
-#define M_NUM_STARS 0xAA   /* s16, goes up the frame he touches a star */
 #define M_HEALTH 0xAE      /* s16, 0x880 is full and under 0x100 is dead */
 #define SURFACE_NORMAL_Y 0x20 /* f32 inside struct Surface */
 
@@ -270,6 +211,8 @@ typedef float obs_t;
 #define ACT_FLAG_ATTACKING (1 << 23)
 #define ACT_FLAG_INVULNERABLE (1 << 17)
 #define ACT_IDLE 0x0C400201
+#define ACT_WATER_IDLE 0x380022C0
+#define ACT_FLYING 0x10880899
 
 /* libultra's button bits, as the pad reports them. */
 #define BUTTON_A 0x8000
@@ -279,6 +222,125 @@ typedef float obs_t;
 
 #define STICK_DIRECTIONS 16
 #define ACTION_HEADS 4
+
+/* --- the courses -----------------------------------------------------------------
+ *
+ * A star is named for its course and its number there, as the act select and
+ * the save file number them: wf-1 is Whomp's Fortress's first star, bob-7
+ * Bob-omb Battlefield's hundred coins, pss-2 the slide's second -- the one for
+ * reaching the bottom inside 21 seconds, which every slide run on file is.
+ * A course's name alone, bob, is any star in it.
+ *
+ * A course's objects depend on the act it was entered for, and a star is only
+ * there in the acts that spawn it. Stars 1 to 6 of a course with an act select
+ * are entered for their own act, and the hundred coins, or any star, for act 1;
+ * `act` in [env] enters for another. A new save file's act select offers act 1
+ * and nothing else, so the act is written over the selected one while the
+ * course loads, before the level script spawns anything (see getting there).
+ *
+ * The courses after rr have no act select: one way in and one course, and the
+ * game keeps the act at 0. For those nothing is written over it, and A is not
+ * pressed on the way in.
+ *
+ * Every course is entered through PAINTING_NODE, and every one of them lands
+ * Mario standing in the course, in the right course number, from a savestate
+ * made from nothing (sm64_tool state).
+ */
+typedef struct {
+    const char* name;  /* what a star's name starts with: wf in wf-1 */
+    const char* title;
+    int level;         /* LEVEL_*: what the game loads, and what a warp names */
+    int course;        /* COURSE_*: what the save file keeps a course's stars by */
+    int stars;
+} SM64Course;
+
+static const SM64Course sm64_courses[] = {
+    {"bob", "Bob-omb Battlefield", 9, 1, 7},
+    {"wf", "Whomp's Fortress", 24, 2, 7},
+    {"jrb", "Jolly Roger Bay", 12, 3, 7},
+    {"ccm", "Cool, Cool Mountain", 5, 4, 7},
+    {"bbh", "Big Boo's Haunt", 4, 5, 7},
+    {"hmc", "Hazy Maze Cave", 7, 6, 7},
+    {"lll", "Lethal Lava Land", 22, 7, 7},
+    {"ssl", "Shifting Sand Land", 8, 8, 7},
+    {"ddd", "Dire, Dire Docks", 23, 9, 7},
+    {"sl", "Snowman's Land", 10, 10, 7},
+    {"wdw", "Wet-Dry World", 11, 11, 7},
+    {"ttm", "Tall, Tall Mountain", 36, 12, 7},
+    {"thi", "Tiny-Huge Island", 13, 13, 7},
+    {"ttc", "Tick Tock Clock", 14, 14, 7},
+    {"rr", "Rainbow Ride", 15, 15, 7},
+    {"bitdw", "Bowser in the Dark World", 17, 16, 1},
+    {"bitfs", "Bowser in the Fire Sea", 19, 17, 1},
+    {"bits", "Bowser in the Sky", 21, 18, 1},
+    {"pss", "Peach's Secret Slide", 27, 19, 2},
+    {"cotmc", "Cavern of the Metal Cap", 28, 20, 1},
+    {"totwc", "Tower of the Wing Cap", 29, 21, 1},
+    {"vcutm", "Vanish Cap Under the Moat", 18, 22, 1},
+    {"wmotr", "Wing Mario Over the Rainbow", 31, 23, 1},
+    {"sa", "The Secret Aquarium", 20, 24, 1},
+};
+#define SM64_COURSES ((int)(sizeof(sm64_courses) / sizeof(sm64_courses[0])))
+#define SM64_ACT_SELECT_COURSES 15 /* bob to rr */
+
+/* One star, as the config names it. */
+typedef struct {
+    const SM64Course* course;
+    int star;       /* 1 to course->stars; 0 is any star in the course */
+    int act;        /* the act it is entered for; 0 for a course with no act select */
+    char name[32];  /* its folder: pss-2, or bob-7-act3 for a star entered for an act not its own */
+} SM64Goal;
+
+static inline int sm64_course_selects_act(const SM64Course* course) {
+    return course->course <= SM64_ACT_SELECT_COURSES;
+}
+
+/* Read `star` and `act` from [env] into a goal. Returns 0 and says why if they
+ * name no star there is. */
+static int sm64_goal_parse(const char* star, int act, SM64Goal* goal, char* error, size_t size) {
+    const char* dash = strchr(star, '-');
+    size_t length = dash != NULL ? (size_t)(dash - star) : strlen(star);
+    memset(goal, 0, sizeof(*goal));
+    for (int k = 0; k < SM64_COURSES; k++) {
+        if (strlen(sm64_courses[k].name) == length && strncmp(sm64_courses[k].name, star, length) == 0) {
+            goal->course = &sm64_courses[k];
+        }
+    }
+    if (goal->course == NULL) {
+        int used = snprintf(error, size, "there is no course called '%.*s'; the courses are", (int)length, star);
+        for (int k = 0; k < SM64_COURSES && used > 0 && (size_t)used < size; k++) {
+            used += snprintf(error + used, size - (size_t)used, " %s", sm64_courses[k].name);
+        }
+        return 0;
+    }
+    const SM64Course* course = goal->course;
+    if (dash != NULL) {
+        char* end;
+        long number = strtol(dash + 1, &end, 10);
+        if (end == dash + 1 || *end != '\0' || number < 1 || number > course->stars) {
+            snprintf(error, size, "'%s': %s has stars %s%d", star, course->title, course->stars > 1 ? "1 to " : "",
+                     course->stars);
+            return 0;
+        }
+        goal->star = (int)number;
+    }
+    int own = !sm64_course_selects_act(course) ? 0 : goal->star >= 1 && goal->star <= 6 ? goal->star : 1;
+    if (act == 0) {
+        act = own;
+    } else if (!sm64_course_selects_act(course)) {
+        snprintf(error, size, "%s has no act select, so act has to be 0, not %d", course->title, act);
+        return 0;
+    } else if (act < 1 || act > 6) {
+        snprintf(error, size, "act %d: a course's acts are 1 to 6", act);
+        return 0;
+    }
+    goal->act = act;
+    int written = snprintf(goal->name, sizeof(goal->name), "%.*s", (int)strlen(star), star);
+    if (act != own && written > 0 && (size_t)written < sizeof(goal->name)) {
+        snprintf(goal->name + written, sizeof(goal->name) - (size_t)written, "-act%d", act);
+    }
+    return 1;
+}
 
 /* The observation, in the order it is written. */
 enum {
@@ -320,28 +382,27 @@ static int sm64_obs_size = NUM_OBS;
 
 /* Required struct. Only use floats! */
 struct Log {
-    float perf;            /* fraction of episodes that opened the door */
-    float score;           /* fraction of the clock left when the door opened, 0 if it did not */
+    float perf;            /* fraction of episodes that took the star */
+    float score;           /* fraction of the clock left when he took it, 0 if he did not */
     float episode_return;
     float episode_length;  /* agent steps */
-    float frames;          /* frames to the door, the whole clock if it stayed shut: what is minimized */
-    float closest;         /* the nearest he came to the door without opening it (the bridge starts at 2980). Logged only: the policy never sees it */
+    float frames;          /* frames to the star, the whole clock without it: what is minimized */
     float novelty;         /* what novelty paid this episode */
-    float ghost;           /* what beating the archive to cubes on the way to the goal paid this episode */
+    float ghost;           /* what beating the archive to cubes on the way to the star paid this episode */
     float cells;           /* cubes entered this episode */
     float explored;        /* cubes any game has ever entered, as of the end of this episode */
     float from_start;      /* fraction of episodes that began where the task does, not from the archive */
-    float start_perf;      /* fraction that began there and opened the door: the door rate is start_perf / from_start */
+    float start_perf;      /* fraction that began there and took the star: the star rate is start_perf / from_start */
     float archive;         /* cubes in the archive */
     float replayed;        /* frames replayed to reach the episode's starting cube, 0 from the real start */
-    float door_cubes;      /* cubes that have been on the way to a door */
-    float frontier;        /* frames before the door that episodes on the demo start at, 0 with no demo */
+    float star_cubes;      /* cubes that have been on the way to the star */
+    float frontier;        /* frames before the star that episodes on the demo start at, 0 with no demo */
     float distance;        /* the length of the path he ran */
     float top_speed;       /* the best single frame of it, units per frame */
     float forward_vel;     /* what the game thought his speed was, on average */
     float airborne;        /* fraction of frames off the ground */
-    float dialog;          /* fraction of frames in a cutscene, which out here means Lakitu */
-    float ended_early;     /* fraction of episodes cut short by a death or a warp that was not the door */
+    float dialog;          /* fraction of frames in a cutscene: dialog, a star spawning */
+    float ended_early;     /* fraction of episodes cut short by a death or a warp out of the course */
     float deaths;          /* deaths an episode spent; without respawn one ends it, so at most one */
     float n;               /* Required as the last field */
 };
@@ -356,6 +417,7 @@ struct Env {
     int num_agents;
     unsigned int rng;     /* vecenv sets this to the env's index; we spawn one game per index */
 
+    SM64Goal goal;        /* which star: `star` and `act` in [env] */
     int frameskip;        /* frames of the game per agent step */
     int max_ticks;        /* frames of the game per episode */
     int random_start;     /* frames of random stick held after loading the state */
@@ -365,13 +427,13 @@ struct Env {
     float novelty_cell;   /* the side of a cube, in units */
     int respawn;          /* a death puts the game back and the episode goes on, rather than ending it */
     float go_explore;     /* share of episodes that start from a cube in the archive */
-    float go_explore_door; /* share of those that start from a cube on the way to a door, once there is one */
+    float go_explore_star; /* share of those that start from a cube on the way to the star, once there is one */
     int go_explore_seed;  /* start the archive with the runs on file rather than with nothing */
-    float ghost;          /* reward per frame sooner than the archive's way into a cube on the way to the goal */
+    float ghost;          /* reward per frame sooner than the archive's way into a cube on the way to the star */
     float backward;       /* share of episodes that start on the demo, a little before the frontier */
     int backward_step;    /* frames the frontier moves back at a time */
-    float backward_rate;  /* the door rate from the frontier that moves it back */
-    int backward_start;   /* frames before the door the frontier begins at; 0 is backward_step */
+    float backward_rate;  /* the star rate from the frontier that moves it back */
+    int backward_start;   /* frames before the star the frontier begins at; 0 is backward_step */
     int window;           /* draw the game, for watching a policy play */
     int picture_width;    /* the game's picture in the observation, shrunk to this; 0 is none */
     int picture_height;
@@ -379,13 +441,9 @@ struct Env {
 
     N64Gym gym;
     int opened;
-    int star;             /* the goal is a star in a course, not the door (SM64_GOAL=star) */
-    int goal_level;       /* the course that star is in (SM64_LEVEL), and which act of it */
-    int goal_act;
-    int stars_at_start;   /* the savestate's star count, which a star raises */
+    int star_flags_at_start; /* the savestate's stars in this course, which the star adds to */
     uint32_t mario;       /* where MarioState is, read once from its pointer */
     float last_x, last_z;
-    float closest;        /* the nearest he has come to the door, for the log */
     uint32_t episode;     /* counts up from 1, to mark which cubes this episode has entered */
     uint32_t* entered;    /* the episode that last entered each cube */
     float novelty_earned;
@@ -441,51 +499,31 @@ static inline int sm64_level(SM64* env) { return n64_s16(&env->gym, CURR_LEVEL_N
 /* An angle the game's way: a signed 16-bit turn of the whole circle. */
 static inline float sm64_radians(int angle) { return (float)angle * (2.0f * (float)M_PI / 65536.0f); }
 
-/* How far Mario is from the door, across the ground. For the log, never the policy. */
-static inline float sm64_door_distance(float x, float z) {
-    return sqrtf((DOOR_X - x) * (DOOR_X - x) + (DOOR_Z - z) * (DOOR_Z - z));
+/* The stars of the goal's course that the save file has. */
+static inline int sm64_star_flags(SM64* env) {
+    return n64_u8(&env->gym, SAVE_FILE_COURSE_STARS + (uint32_t)(env->goal.course->course - 1));
 }
 
-/* The same for whichever goal this is. */
-static inline float sm64_goal_distance(const SM64* env, float x, float z) {
-    if (!env->star) {
-        return sm64_door_distance(x, z);
-    }
-    /* Only Bob-omb Battlefield's act 1 star has a place written down here. */
-    if (env->goal_level != LEVEL_BOB || env->goal_act != 1) {
-        return 0.0f;
-    }
-    return sqrtf((STAR_X - x) * (STAR_X - x) + (STAR_Z - z) * (STAR_Z - z));
-}
-
-static inline int sm64_home_level(const SM64* env) {
-    return env->star ? env->goal_level : LEVEL_CASTLE_GROUNDS;
-}
-
-/* The door, the frame it starts to open, or a star, the frame it is his: the
- * star count going up as he touches it. The level check is only a backstop for
- * the door: a step is two frames, so its action is always seen before the warp
- * inside. */
+/* The star, the frame it is his: its flag in the save file going on as he
+ * touches it, the same frame the star count goes up. Any other star in the
+ * course is not it, and taking one throws Mario out of the course, which ends
+ * the episode as a death does. */
 static int sm64_goal_reached(SM64* env) {
-    if (env->star) {
-        return n64_s16(&env->gym, env->mario + M_NUM_STARS) > env->stars_at_start;
-    }
-    uint32_t action = sm64_action(env);
-    return action == ACT_PUSHING_DOOR || action == ACT_PULLING_DOOR || sm64_level(env) == LEVEL_CASTLE;
+    int wanted = env->goal.star > 0 ? 1 << (env->goal.star - 1) : 0x7F;
+    return (sm64_star_flags(env) & ~env->star_flags_at_start & wanted) != 0;
 }
 
 /* Whether a star is spawning: time stopped for Mario and the doors (see
- * TIME_STOP_STATE). Not the goal, but sm64_tool reports it, because the demos
- * kept while it was the goal end there. */
+ * TIME_STOP_STATE). Not the goal, but sm64_tool reports it. */
 static int sm64_star_spawning(SM64* env) {
-    return env->star && (n64_s16(&env->gym, TIME_STOP_STATE) & TIME_STOP_MARIO_AND_DOORS) != 0;
+    return (n64_s16(&env->gym, TIME_STOP_STATE) & TIME_STOP_MARIO_AND_DOORS) != 0;
 }
 
 /* --- novelty ------------------------------------------------------------------
  *
  * Cubes over the whole of a level's space: x and z from -8192 to 8192, y from
  * -4096 to 8192. The visit counts are one table for the process, because the
- * games stepping in parallel are exploring the same grounds, and a cube one of
+ * games stepping in parallel are exploring the same course, and a cube one of
  * them has worn out is not new to the others. Increments race between threads,
  * so they are atomic.
  */
@@ -509,15 +547,13 @@ static inline int sm64_cube(const SM64* env, float x, float y, float z) {
     return (j * NOVELTY_MAX_XZ + k) * NOVELTY_MAX_XZ + i;
 }
 
-/* Novelty's pay for being where Mario is now: something the first time this
- * episode he is in a cube, nothing after. */
 /* --- the archive (Go-Explore) ------------------------------------------------
  *
  * For every cube, the shortest run of pad inputs from the savestate that has
  * reached it. One archive for the process, like the visit counts, behind a
  * lock: the games reset and step in parallel. A run longer than
  * ARCHIVE_EPISODES episodes' worth of frames is not kept, so no reset replays
- * more than that: 2700 frames with the door's 900-frame episodes.
+ * more than that: 2700 frames with 900-frame episodes.
  */
 typedef struct SM64Input {
     uint16_t buttons;
@@ -551,7 +587,7 @@ static void sm64_watch_camera(SM64* env);
 
 /* Play the trail into the game, from the savestate: the start of an episode
  * that begins further on. The cubes it passes through count as this episode's,
- * so a door from here credits them too. (The episode number goes up once reset
+ * so a star from here credits them too. (The episode number goes up once reset
  * is done, hence + 1.) They pay no novelty: the policy did not walk them. */
 static void sm64_replay_trail(SM64* env) {
     for (int k = 0; k < env->trail_count; k++) {
@@ -600,22 +636,20 @@ static void sm64_archive_offer(SM64* env, int cube) {
     pthread_mutex_unlock(&sm64_archive_lock);
 }
 
-/* Start from a cube in the archive, weighted to the ones fewest episodes have
- * entered: copy its run onto this episode's trail and replay it. The game is
- * left where that run left it. Returns the cube, or -1 if the archive is empty. */
-/* Which cubes have been on the way to the door, and how many episodes have
+/* Which cubes have been on the way to the star, and how many episodes have
  * started from each. Rarity alone was not enough: after 8M steps of starting
  * from the cubes fewest episodes had entered -- far corners of the moat and the
- * lake, mostly -- the door opened once in a thousand, from either kind of
- * start. So once an episode has opened the door, every cube it passed through,
- * the replayed part included, is credited, and a go_explore_door share of
- * archive starts are drawn from those cubes, least started-from first: all the
- * way along some path to the door, from near the start to the step before it.
- * That is still only the reward speaking. Nothing says where the door is. */
-static uint32_t sm64_cube_doors[NOVELTY_CUBES];
+ * lake, mostly, when the goal was the castle door -- the door opened once in a
+ * thousand, from either kind of start. So once an episode has taken the star,
+ * every cube it passed through, the replayed part included, is credited, and a
+ * go_explore_star share of archive starts are drawn from those cubes, least
+ * started-from first: all the way along some path to the star, from near the
+ * start to the step before it. That is still only the reward speaking. Nothing
+ * says where the star is. */
+static uint32_t sm64_cube_stars[NOVELTY_CUBES];
 static uint32_t sm64_cube_starts[NOVELTY_CUBES];
-static int sm64_door_cubes[NOVELTY_CUBES];
-static int sm64_door_cube_count;
+static int sm64_star_cubes[NOVELTY_CUBES];
+static int sm64_star_cube_count;
 
 /* Draw a cube from a list, each weighted 1 / sqrt(1 + its count). Call with the lock held. */
 static int sm64_draw(SM64* env, const int* cubes, int count, const uint32_t* counts) {
@@ -633,23 +667,26 @@ static int sm64_draw(SM64* env, const int* cubes, int count, const uint32_t* cou
     return cubes[count - 1];
 }
 
-/* The episode has opened the door: credit every cube it was in. */
-static void sm64_credit_door(SM64* env, int door_cube) {
-    if (door_cube >= 0) {
-        env->entered[door_cube] = env->episode;
+/* The episode has taken the star: credit every cube it was in. */
+static void sm64_credit_star(SM64* env, int star_cube) {
+    if (star_cube >= 0) {
+        env->entered[star_cube] = env->episode;
     }
     pthread_mutex_lock(&sm64_archive_lock);
     for (int cube = 0; cube < NOVELTY_CUBES; cube++) {
         if (env->entered[cube] != env->episode || sm64_archive[cube].inputs == NULL) {
             continue;
         }
-        if (sm64_cube_doors[cube]++ == 0) {
-            sm64_door_cubes[sm64_door_cube_count++] = cube;
+        if (sm64_cube_stars[cube]++ == 0) {
+            sm64_star_cubes[sm64_star_cube_count++] = cube;
         }
     }
     pthread_mutex_unlock(&sm64_archive_lock);
 }
 
+/* Start from a cube in the archive: copy its run onto this episode's trail and
+ * replay it. The game is left where that run left it. Returns the cube, or -1
+ * if the archive is empty. */
 static int sm64_archive_start(SM64* env) {
     pthread_mutex_lock(&sm64_archive_lock);
     if (sm64_archive_size == 0) {
@@ -657,9 +694,9 @@ static int sm64_archive_start(SM64* env) {
         return -1;
     }
     int cube;
-    if (sm64_door_cube_count > 0 &&
-        (double)rand_r(&env->seed) / ((double)RAND_MAX + 1.0) < env->go_explore_door) {
-        cube = sm64_draw(env, sm64_door_cubes, sm64_door_cube_count, sm64_cube_starts);
+    if (sm64_star_cube_count > 0 &&
+        (double)rand_r(&env->seed) / ((double)RAND_MAX + 1.0) < env->go_explore_star) {
+        cube = sm64_draw(env, sm64_star_cubes, sm64_star_cube_count, sm64_cube_starts);
     } else {
         cube = sm64_draw(env, sm64_archive_cubes, sm64_archive_size, sm64_cube_visits);
     }
@@ -678,13 +715,14 @@ static int sm64_archive_start(SM64* env) {
 
 /* --- the ghost ------------------------------------------------------------------
  *
- * The clock pays for speed only at the goal, and little: thirty frames off a
- * 770-frame star is 0.02 of reward. What a run does get faster by is the archive, which keeps the shortest way into every
- * cube -- so the archive's way into a cube is a ghost to race, as in a racing
- * game, and beating it is paid where it happens rather than 400 frames later.
+ * The clock pays for speed only at the star, and little: thirty frames off a
+ * 770-frame star is 0.02 of reward. What a run does get faster by is the
+ * archive, which keeps the shortest way into every cube -- so the archive's way
+ * into a cube is a ghost to race, as in a racing game, and beating it is paid
+ * where it happens rather than 400 frames later.
  *
  * The first time in an episode Mario enters a cube that has been on the way to
- * the goal, sooner than the archive's way into it, he is paid `ghost` a frame
+ * the star, sooner than the archive's way into it, he is paid `ghost` a frame
  * of the difference, GHOST_MOST at most. The archive then keeps his way, so the
  * ghost is as fast as he was and doing the same again pays nothing: only a
  * faster run is ever paid, and a run fifty frames up on the ghost is paid at
@@ -705,13 +743,15 @@ static float sm64_ghost(SM64* env, int cube) {
     float pay = 0.0f;
     pthread_mutex_lock(&sm64_archive_lock);
     const SM64Cell* cell = &sm64_archive[cube];
-    if (sm64_cube_doors[cube] > 0 && cell->inputs != NULL && env->trail_frames < cell->frames) {
+    if (sm64_cube_stars[cube] > 0 && cell->inputs != NULL && env->trail_frames < cell->frames) {
         pay = fminf(env->ghost * (float)(cell->frames - env->trail_frames), GHOST_MOST);
     }
     pthread_mutex_unlock(&sm64_archive_lock);
     return pay;
 }
 
+/* Novelty's pay for being where Mario is now: something the first time this
+ * episode he is in a cube, nothing after. */
 static float sm64_novelty(SM64* env, float x, float y, float z) {
     /* A place is somewhere Mario could be. Falling out of the world is not: a
      * cube is novelty_cell units, so a fall through empty space enters a fresh
@@ -791,31 +831,50 @@ static void sm64_watch_camera(SM64* env) {
     env->camera_offset = (int16_t)(intended - env->last_stick_angle);
 }
 
-/* Whether the course asks which act it is being entered for. A secret course
- * does not: it drops Mario straight in and leaves the act at 0. */
-static inline int sm64_level_selects_act(int level) { return level != LEVEL_PSS; }
-
-/* --- getting to the castle grounds ------------------------------------------
+/* --- getting there --------------------------------------------------------------
  *
  * Two presses of Start reach the file select and open the first file; from
  * there the game plays Peach's letter and Lakitu's arrival, which is a minute
  * and a half of cutscene that waits on A for its text boxes. Mashing A through
  * it takes about 1500 frames and ends with Mario standing outside the castle in
- * ACT_IDLE, which is where every episode should start -- so it is done once and
- * saved.
+ * ACT_IDLE.
  *
  * Start is deliberately not mashed after the menus: in the game it opens the
  * pause screen, and a game paused is a game that never gets anywhere.
  *
- * For the star, the castle's front door is then pointed at Bob-omb Battlefield
- * (see DOOR_WARP_NODE_LEFT) and Mario is put in front of it with the stick
- * pushed forward. He opens it, the game fades to the act select, A picks act
- * 1 -- the only act a new save has -- and he lands at the start of the course.
- * A secret course has no act select, so there A is not pressed and the act is
- * left where the game put it.
+ * Then the castle's front door is pointed at the star's course (see
+ * DOOR_WARP_NODE_LEFT) and Mario is put in front of it with the stick pushed
+ * forward. He opens it, the game fades to the act select, A picks the only act
+ * a new save has while the star's is written over it, and he lands where the
+ * course's painting would have dropped him. A course with no act select drops
+ * him straight in, and there A is not pressed. That is done once for a star and
+ * saved, and every episode starts from it.
  */
-static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, int act, char* error,
-                           size_t error_size) {
+
+/* Where a course leaves Mario once it has him: standing, or, in the courses he
+ * arrives in by water or in flight -- Dire, Dire Docks, the Secret Aquarium, the
+ * Tower of the Wing Cap -- floating or flying. */
+static int sm64_arrived(uint32_t action) {
+    return action == ACT_IDLE || action == ACT_WATER_IDLE || action == ACT_FLYING;
+}
+
+/* Whether Mario answers the pad in the game as it is: A and the stick held for a
+ * few frames change what he is doing, or move him across the ground. Under a
+ * course's opening camera neither happens. Across the ground, because in the
+ * Secret Aquarium he sinks whatever is held. The game is put back after. */
+static int sm64_answers(N64Gym* gym, const char* path) {
+    uint32_t mario = n64_u32(gym, MARIO_STATE_PTR);
+    uint32_t action = n64_u32(gym, mario + M_ACTION);
+    float x = n64_f32(gym, mario + M_POS), z = n64_f32(gym, mario + M_POS + 8);
+    n64gym_pad(gym, BUTTON_A, 0.0f, 1.0f);
+    n64gym_step(gym, 10);
+    n64gym_pad(gym, 0, 0.0f, 0.0f);
+    float dx = n64_f32(gym, mario + M_POS) - x, dz = n64_f32(gym, mario + M_POS + 8) - z;
+    int answered = n64_u32(gym, mario + M_ACTION) != action || dx * dx + dz * dz > 1.0f;
+    return n64gym_load_state(gym, path) ? answered : -1;
+}
+
+static int sm64_make_state(N64Gym* gym, const char* path, const SM64Goal* goal, char* error, size_t error_size) {
     uint16_t buttons;
     int in_grounds = 0;
     for (int i = 0; i < 4000 && !in_grounds; i++) {
@@ -848,13 +907,6 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
         snprintf(error, error_size, "%s", gym->error);
         return 0;
     }
-    if (!star) {
-        if (!n64gym_save_state(gym, path)) {
-            snprintf(error, error_size, "%s", gym->error);
-            return 0;
-        }
-        return 1;
-    }
 
     if (n64_u32(gym, DOOR_WARP_NODE_LEFT) != DOOR_WARP_TO_CASTLE_LEFT ||
         n64_u32(gym, DOOR_WARP_NODE_RIGHT) != DOOR_WARP_TO_CASTLE_RIGHT) {
@@ -862,6 +914,7 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
                  DOOR_WARP_NODE_LEFT, DOOR_WARP_NODE_RIGHT);
         return 0;
     }
+    int level = goal->course->level, act = goal->act;
     n64_set_u32(gym, DOOR_WARP_NODE_LEFT, 0x00000100 | ((uint32_t)level << 16) | PAINTING_NODE);
     n64_set_u32(gym, DOOR_WARP_NODE_RIGHT, 0x01000100 | ((uint32_t)level << 16) | PAINTING_NODE);
     uint32_t mario = n64_u32(gym, MARIO_STATE_PTR);
@@ -869,7 +922,7 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
     n64_set_f32(gym, mario + M_POS + 4, 803.0f);
     n64_set_f32(gym, mario + M_POS + 8, -2900.0f);
 
-    int selects_act = sm64_level_selects_act(level);
+    int selects_act = sm64_course_selects_act(goal->course);
     int spawned = 0, landed = 0;
     for (int i = 0; i < 1500 && !landed; i++) {
         int now_in = n64_s16(gym, CURR_LEVEL_NUM);
@@ -879,54 +932,54 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
         n64gym_pad(gym, (selects_act && now_in == level && !spawned && (i % 16) < 2) ? BUTTON_A : 0,
                    0.0f, now_in == LEVEL_CASTLE_GROUNDS ? 1.0f : 0.0f);
         if (!n64gym_step(gym, 1)) {
-            snprintf(error, error_size, "the game stopped on the way to level %d: %s", level, gym->error);
+            snprintf(error, error_size, "the game stopped on the way to %s: %s", goal->course->title, gym->error);
             return 0;
         }
         /* The act the save file could not offer, written over the one it did,
          * every frame of the load: the level script reads it when it spawns the
-         * course's objects, and that is what decides which star is there. */
+         * course's objects, and that is what decides which stars are there. */
         if (selects_act && n64_s16(gym, CURR_LEVEL_NUM) == level) {
             n64_set_s16(gym, CURR_ACT_NUM, (int16_t)act);
         }
+        /* Until the course has spawned him, he is still the Mario who walked
+         * into the door. It drops him in from the air, or into the water. */
         mario = n64_u32(gym, MARIO_STATE_PTR);
         uint32_t action = n64_is_ram(mario) ? n64_u32(gym, mario + M_ACTION) : 0;
-        spawned = spawned || (n64_s16(gym, CURR_LEVEL_NUM) == level && (action & ACT_FLAG_AIR));
-        landed = spawned && action == ACT_IDLE;
+        spawned = spawned || (n64_s16(gym, CURR_LEVEL_NUM) == level && (action & (ACT_FLAG_AIR | ACT_FLAG_SWIMMING)));
+        landed = spawned && sm64_arrived(action);
     }
-    if (!landed || n64_s16(gym, CURR_LEVEL_NUM) != level ||
+    if (!landed || n64_s16(gym, CURR_LEVEL_NUM) != level || n64_s16(gym, CURR_COURSE_NUM) != goal->course->course ||
         (selects_act && n64_s16(gym, CURR_ACT_NUM) != act)) {
         snprintf(error, error_size,
-                 "the door never left Mario standing in level %d act %d (level %d course %d act %d)", level,
-                 act, n64_s16(gym, CURR_LEVEL_NUM), n64_s16(gym, CURR_COURSE_NUM),
-                 n64_s16(gym, CURR_ACT_NUM));
+                 "the door never left Mario standing in %s (level %d course %d act %d), "
+                 "but in level %d course %d act %d",
+                 goal->course->title, level, goal->course->course, act, n64_s16(gym, CURR_LEVEL_NUM),
+                 n64_s16(gym, CURR_COURSE_NUM), n64_s16(gym, CURR_ACT_NUM));
         return 0;
     }
     /* He lands with the course's opening camera still holding the level: Mario
      * does not move, whatever is held, until a button is pressed after about
      * two seconds of it, and that press is spent on the camera. A state saved
      * before then loads into a game where he never moves at all. So B is
-     * pressed every half second, and a state is kept only once, put back and
-     * dropped from the air, Mario falls. */
+     * pressed every half second, and a state is kept only once, put back, Mario
+     * answers the pad. */
     for (int tries = 0; tries < 30; tries++) {
         n64gym_pad(gym, BUTTON_B, 0.0f, 0.0f);
         n64gym_step(gym, 2);
         n64gym_pad(gym, 0, 0.0f, 0.0f);
-        for (int wait = 0; wait < 90 && (wait < 14 || n64_u32(gym, mario + M_ACTION) != ACT_IDLE); wait++) {
+        for (int wait = 0; wait < 90 && (wait < 14 || !sm64_arrived(n64_u32(gym, mario + M_ACTION))); wait++) {
             n64gym_step(gym, 1);
         }
         if (!n64gym_save_state(gym, path) || !n64gym_load_state(gym, path)) {
             snprintf(error, error_size, "%s", gym->error);
             return 0;
         }
-        float y = n64_f32(gym, mario + M_POS + 4);
-        n64_set_f32(gym, mario + M_POS + 4, y + 300.0f);
-        n64gym_step(gym, 1);
-        int falls = (n64_u32(gym, mario + M_ACTION) & ACT_FLAG_AIR) != 0;
-        if (!n64gym_load_state(gym, path)) {
+        int answers = sm64_answers(gym, path);
+        if (answers < 0) {
             snprintf(error, error_size, "%s", gym->error);
             return 0;
         }
-        if (falls) {
+        if (answers) {
             return 1;
         }
     }
@@ -934,112 +987,91 @@ static int sm64_make_state(N64Gym* gym, const char* path, int star, int level, i
     return 0;
 }
 
-/* --- the environment --------------------------------------------------------- */
-
+/* --- where a star keeps its things ----------------------------------------------
+ *
+ * A folder a star, <SM64_DATA>/<star>/ (build/sm64/pss-2/), so two stars never
+ * overwrite each other's:
+ *
+ *     start.state      where every episode starts, made the first time
+ *     fastest.demo     the fastest run to the star on file, which backward works along
+ *     fastest/         the FASTEST_RUNS fastest, to watch and to seed the archive with
+ *     seeds/           runs kept by hand, seeding the archive too
+ *     states-<hash>/   the game at points along a demo, for starting episodes there
+ *
+ * One star for the process, like the archive: every game in it is after the same
+ * one. Worked out once, at the first game's init, because every episode asks.
+ */
 static const char* sm64_setting(const char* name, const char* fallback) {
     const char* found = getenv(name);
     return (found != NULL && found[0] != '\0') ? found : fallback;
 }
 
-/* One goal for the process, like the archive: the door, or SM64_GOAL=star. */
-static int sm64_star_goal(void) { return strcmp(sm64_setting("SM64_GOAL", "door"), "star") == 0; }
+static SM64Goal sm64_goal;
+static char sm64_dir[1024];
+static char sm64_state_file[1100];
+static char sm64_demo_file[1100];
+static pthread_mutex_t sm64_goal_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Which course the star is in, and which act of it. The defaults are the course
- * and act a new save file can reach on its own; see the star. */
-static int sm64_star_level(void) {
-    int level = atoi(sm64_setting("SM64_LEVEL", "9"));
-    return level > 0 ? level : LEVEL_BOB;
-}
-
-static int sm64_star_act(void) {
-    if (!sm64_level_selects_act(sm64_star_level())) {
-        return 0; /* what the game keeps for a secret course */
+/* mkdir -p */
+static void sm64_make_dirs(const char* path) {
+    char partial[1024];
+    snprintf(partial, sizeof(partial), "%s", path);
+    for (char* p = partial + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(partial, 0755);
+            *p = '/';
+        }
     }
-    int act = atoi(sm64_setting("SM64_ACT", "1"));
-    return act >= 1 && act <= 6 ? act : 1;
+    mkdir(partial, 0755);
 }
 
-/* A file per course and act, so two of them do not overwrite each other's state
- * or demo. The first stays where it was -- bob-omb-battlefield.state,
- * star.demo -- and the rest are named beside it: star-level24-act2.state.
- * Worked out once, because every episode asks for the state. */
-static void sm64_goal_path(const char* path, int level, int act, char* out, size_t size) {
-    const char* dot = strrchr(path, '.');
-    const char* slash = strrchr(path, '/');
-    size_t directory = slash != NULL ? (size_t)(slash - path) + 1 : 0;
-    snprintf(out, size, "%.*sstar-level%d-act%d%s", (int)directory, path, level, act,
-             dot != NULL && (slash == NULL || dot > slash) ? dot : "");
-}
-
-static char sm64_star_state[1024];
-static char sm64_star_demo[1024];       /* the fastest touch of the star on file */
-static char sm64_star_spawn_demo[1024]; /* the fastest spawn, kept while that was the goal */
-static pthread_once_t sm64_paths_once = PTHREAD_ONCE_INIT;
-
-/* star-level27-act0.demo -> star-level27-act0-touch.demo. A star's demo counts
- * the frames to the touch; the ones kept while the spawn was the goal stop a
- * hundred or more frames short of it, so the two are kept apart and never
- * compared: a touch of any length beats no touch. */
-static void sm64_touch_path(const char* path, char* out, size_t size) {
-    const char* dot = strrchr(path, '.');
-    const char* slash = strrchr(path, '/');
-    if (dot == NULL || (slash != NULL && dot < slash)) {
-        snprintf(out, size, "%s-touch", path);
-    } else {
-        snprintf(out, size, "%.*s-touch%s", (int)(dot - path), path, dot);
+static void sm64_use_goal(const SM64Goal* goal) {
+    pthread_mutex_lock(&sm64_goal_lock);
+    if (sm64_dir[0] == '\0') {
+        sm64_goal = *goal;
+        snprintf(sm64_dir, sizeof(sm64_dir), "%s/%s", sm64_setting("SM64_DATA", SM64_DATA), goal->name);
+        snprintf(sm64_state_file, sizeof(sm64_state_file), "%s/start.state", sm64_dir);
+        snprintf(sm64_demo_file, sizeof(sm64_demo_file), "%s/fastest.demo", sm64_dir);
+        sm64_make_dirs(sm64_dir);
+    } else if (strcmp(sm64_goal.name, goal->name) != 0) {
+        fprintf(stderr, "sm64: one star a process, and this one is already after %s, not %s\n", sm64_goal.name,
+                goal->name);
+        exit(1);
     }
+    pthread_mutex_unlock(&sm64_goal_lock);
 }
 
-static void sm64_work_out_paths(void) {
-    const char* state = sm64_setting("SM64_STAR_STATE", SM64_STAR_STATE);
-    const char* demo = sm64_setting("SM64_STAR_DEMO", SM64_STAR_DEMO);
-    int level = sm64_star_level(), act = sm64_star_act();
-    if (level == LEVEL_BOB && act == 1) {
-        snprintf(sm64_star_state, sizeof(sm64_star_state), "%s", state);
-        snprintf(sm64_star_spawn_demo, sizeof(sm64_star_spawn_demo), "%s", demo);
-    } else {
-        sm64_goal_path(state, level, act, sm64_star_state, sizeof(sm64_star_state));
-        sm64_goal_path(demo, level, act, sm64_star_spawn_demo, sizeof(sm64_star_spawn_demo));
-    }
-    sm64_touch_path(sm64_star_spawn_demo, sm64_star_demo, sizeof(sm64_star_demo));
-}
+static const char* sm64_state_path(void) { return sm64_state_file; }
+static const char* sm64_demo_path(void) { return sm64_demo_file; }
 
-static const char* sm64_state_path(void) {
-    if (!sm64_star_goal()) {
-        return sm64_setting("SM64_STATE", SM64_STATE);
-    }
-    pthread_once(&sm64_paths_once, sm64_work_out_paths);
-    return sm64_star_state;
-}
-
-/* --- the fastest door (Go-Explore's second phase) ----------------------------
+/* --- the fastest run (Go-Explore's second phase) -------------------------------
  *
- * The archive reaches the door by replaying inputs, which works only because
- * the game is deterministic. A policy started from the castle grounds has never
- * seen most of that way, so the second phase trains one to repeat it:
- * robustifying, with the backward algorithm (Salimans and Chen, 2018), which is
- * what Go-Explore used.
+ * The archive reaches the star by replaying inputs, which works only because
+ * the game is deterministic. A policy started from the savestate has never seen
+ * most of that way, so the second phase trains one to repeat it: robustifying,
+ * with the backward algorithm (Salimans and Chen, 2018), which is what
+ * Go-Explore used.
  *
- * Every exploring run (go_explore on) that opens the door offers its inputs,
- * from the savestate, to the demo file (SM64_DEMO), which keeps the fastest
- * door any of them has found -- and so does every robustifying run (backward
- * on), so a policy that beats its demo leaves a faster one for the next run.
- * A `backward` share of episodes start on that demo
- * at the frontier -- the game as the demo left it that many frames before the
- * door -- and play from there. The frontier begins backward_step frames before
- * the door. Once backward_rate of
- * a window of episodes started from it open the door, it moves backward_step
- * frames further back, until it is the start of the demo. The rest of the
- * episodes start where the task does, so start_perf / from_start is still the
- * door rate that counts.
+ * Every exploring run (go_explore on) that takes the star offers its inputs,
+ * from the savestate, to the demo file, which keeps the fastest run any of them
+ * has found -- and so does every robustifying run (backward on), so a policy
+ * that beats its demo leaves a faster one for the next run. A `backward` share
+ * of episodes start on that demo at the frontier -- the game as the demo left
+ * it that many frames before the star -- and play from there. The frontier
+ * begins backward_step frames before the star. Once backward_rate of a window
+ * of episodes started from it take the star, it moves backward_step frames
+ * further back, until it is the start of the demo. The rest of the episodes
+ * start where the task does, so start_perf / from_start is still the star rate
+ * that counts.
  *
  * Half the episodes on the demo start at a frontier already passed, nearer the
- * door, instead, and do not count toward moving it, so what the policy has
- * already learned keeps being paid for. Without them, the first run's frontier
- * went from 30 frames to 180 in 165K steps, into Lakitu's speech (348 to 102
- * frames before the door in that demo), and stopped there. Every episode on
- * the demo then started where the policy could not yet win, and by 200K steps
- * it played at random (entropy 4.3 of 4.9) and opened nothing.
+ * star, instead, and do not count toward moving it, so what the policy has
+ * already learned keeps being paid for. Without them, the first run on the
+ * castle door moved its frontier from 30 frames to 180 in 165K steps, into
+ * Lakitu's speech, and stopped there. Every episode on the demo then started
+ * where the policy could not yet win, and by 200K steps it played at random
+ * (entropy 4.3 of 4.9) and opened nothing.
  *
  * The demo a run robustifies is the one on file when it starts.
  */
@@ -1050,7 +1082,7 @@ static const char* sm64_state_path(void) {
 typedef struct {
     char magic[8];
     int32_t count;  /* inputs */
-    int32_t frames; /* from the savestate to the frame the door starts to open */
+    int32_t frames; /* from the savestate to the frame the star is his */
 } SM64DemoHeader;
 
 /* A run's inputs, hashed (FNV-1a): the same run found twice hashes the same. */
@@ -1065,18 +1097,10 @@ static uint32_t sm64_inputs_hash(const SM64Input* inputs, int count) {
 
 static SM64Input* sm64_demo;      /* what this run robustifies, read once */
 static int sm64_demo_count, sm64_demo_frames;
-static int sm64_demo_best = -1;   /* frames of the fastest door on file, once it has been looked at */
-static int sm64_frontier;         /* frames before the door */
-static int sm64_frontier_tries, sm64_frontier_doors;
+static int sm64_demo_best = -1;   /* frames of the fastest run on file, once it has been looked at */
+static int sm64_frontier;         /* frames before the star */
+static int sm64_frontier_tries, sm64_frontier_stars;
 static pthread_mutex_t sm64_demo_lock = PTHREAD_MUTEX_INITIALIZER;
-
-static const char* sm64_demo_path(void) {
-    if (!sm64_star_goal()) {
-        return sm64_setting("SM64_DEMO", SM64_DEMO);
-    }
-    pthread_once(&sm64_paths_once, sm64_work_out_paths);
-    return sm64_star_demo;
-}
 
 /* A demo's inputs, or NULL if the file has none. */
 static SM64Input* sm64_demo_read(const char* path, int* count, int* frames) {
@@ -1105,7 +1129,7 @@ static SM64Input* sm64_demo_read(const char* path, int* count, int* frames) {
 /* Write a run of inputs as a demo. Written beside the file and renamed over it,
  * so a reader never sees half. `writer` keeps two games' files apart. */
 static int sm64_demo_write(const char* path, int writer, const SM64Input* inputs, int count, int frames) {
-    char temporary[1024];
+    char temporary[1200];
     snprintf(temporary, sizeof(temporary), "%s.%d", path, writer);
     FILE* file = fopen(temporary, "wb");
     if (file == NULL) {
@@ -1118,7 +1142,7 @@ static int sm64_demo_write(const char* path, int writer, const SM64Input* inputs
     return fclose(file) == 0 && written && rename(temporary, path) == 0;
 }
 
-/* This episode has opened the door: if no run on file was faster, it is the demo now. */
+/* This episode has taken the star: if no run on file was faster, it is the demo now. */
 static void sm64_demo_offer(SM64* env) {
     pthread_mutex_lock(&sm64_demo_lock);
     const char* path = sm64_demo_path();
@@ -1132,7 +1156,7 @@ static void sm64_demo_offer(SM64* env) {
         if (sm64_demo_write(path, (int)env->rng, env->trail, env->trail_count, env->trail_frames)) {
             sm64_demo_best = env->trail_frames;
         } else {
-            fprintf(stderr, "sm64: could not keep a door of %d frames in %s\n", env->trail_frames, path);
+            fprintf(stderr, "sm64: could not keep a star of %d frames in %s\n", env->trail_frames, path);
         }
     }
     pthread_mutex_unlock(&sm64_demo_lock);
@@ -1140,20 +1164,19 @@ static void sm64_demo_offer(SM64* env) {
 
 /* --- the fastest runs, to watch ----------------------------------------------
  *
- * The demo keeps one run, and any slower way to the goal is gone when its
+ * The demo keeps one run, and any slower way to the star is gone when its
  * episode ends -- and with it the archive's cube it started from, so nothing can
- * play it again. So every episode that reaches the goal, exploring or not, also
- * offers its inputs to a folder beside the demo (star-level27-act0.demo ->
- * star-level27-act0-fastest/), which keeps the FASTEST_RUNS fastest. A file is
- * named for its frames and a hash of its inputs, 01532-9a3c1e2b.demo, so the
- * folder lists fastest first and the same run found twice is kept once.
- * `sm64_tool replay watch <file>` plays one.
+ * play it again. So every episode that takes the star, exploring or not, also
+ * offers its inputs to the star's fastest/ folder, which keeps the FASTEST_RUNS
+ * fastest. A file is named for its frames and a hash of its inputs,
+ * 01532-9a3c1e2b.demo, so the folder lists fastest first and the same run found
+ * twice is kept once. `sm64_tool replay watch <file>` plays one.
  */
 #ifndef FASTEST_RUNS
 #define FASTEST_RUNS 10
 #endif
 
-static char sm64_fastest_dir[1024];
+static char sm64_fastest_dir[1100];
 static char sm64_fastest[FASTEST_RUNS + 1][32]; /* file names, fastest first */
 static int sm64_fastest_frames[FASTEST_RUNS + 1];
 static int sm64_fastest_count = -1; /* until the folder has been read */
@@ -1170,7 +1193,7 @@ static void sm64_fastest_insert(const char* name, int frames) {
     sm64_fastest_frames[k] = frames;
     snprintf(sm64_fastest[k], sizeof(sm64_fastest[k]), "%s", name);
     if (++sm64_fastest_count > FASTEST_RUNS) {
-        char path[1100];
+        char path[1200];
         snprintf(path, sizeof(path), "%s/%s", sm64_fastest_dir, sm64_fastest[FASTEST_RUNS]);
         remove(path);
         sm64_fastest_count = FASTEST_RUNS;
@@ -1179,12 +1202,7 @@ static void sm64_fastest_insert(const char* name, int frames) {
 
 /* What an earlier run left in the folder, once for the process. */
 static void sm64_fastest_read(void) {
-    const char* demo = sm64_demo_path();
-    size_t stem = strlen(demo);
-    if (stem >= 5 && strcmp(demo + stem - 5, ".demo") == 0) {
-        stem -= 5;
-    }
-    snprintf(sm64_fastest_dir, sizeof(sm64_fastest_dir), "%.*s-fastest", (int)stem, demo);
+    snprintf(sm64_fastest_dir, sizeof(sm64_fastest_dir), "%s/fastest", sm64_dir);
     sm64_fastest_count = 0;
     DIR* dir = opendir(sm64_fastest_dir);
     if (dir == NULL) {
@@ -1202,7 +1220,7 @@ static void sm64_fastest_read(void) {
     closedir(dir);
 }
 
-/* This episode has reached the goal: keep it if it is among the fastest. */
+/* This episode has taken the star: keep it if it is among the fastest. */
 static void sm64_fastest_offer(SM64* env) {
     pthread_mutex_lock(&sm64_demo_lock);
     if (sm64_fastest_count < 0) {
@@ -1215,7 +1233,7 @@ static void sm64_fastest_offer(SM64* env) {
         for (int k = 0; k < sm64_fastest_count; k++) {
             kept |= strcmp(sm64_fastest[k], name) == 0;
         }
-        char path[1100];
+        char path[1200];
         snprintf(path, sizeof(path), "%s/%s", sm64_fastest_dir, name);
         mkdir(sm64_fastest_dir, 0755);
         if (!kept && sm64_demo_write(path, (int)env->rng, env->trail, env->trail_count, env->trail_frames)) {
@@ -1228,32 +1246,25 @@ static void sm64_fastest_offer(SM64* env) {
 }
 
 /* Read the demo to robustify, once for the process. */
-static char sm64_demo_states[1100]; /* where the game is kept at each point of the demo episodes start from */
+static char sm64_demo_states[1200]; /* where the game is kept at each point of the demo episodes start from */
 
-/* Remove every folder of states beside this one for the same demo file -- the
- * states of demos since replaced. Only files named like a state go, and a folder
- * with anything else in it stays. */
+/* Remove every other folder of states in the star's folder -- the states of
+ * demos since replaced, 8 MB each and no use now. Only files named like a state
+ * go, and a folder with anything else in it stays. */
 static void sm64_remove_other_states(const char* keep) {
     const char* slash = strrchr(keep, '/');
-    const char* tag = strstr(slash != NULL ? slash : keep, "-states-");
-    if (tag == NULL) {
-        return;
-    }
-    char directory[1100];
-    snprintf(directory, sizeof(directory), "%.*s", slash != NULL ? (int)(slash - keep) : 1, slash != NULL ? keep : ".");
     const char* name = slash != NULL ? slash + 1 : keep;
-    size_t prefix = (size_t)(tag - name) + strlen("-states-");
-    DIR* dir = opendir(directory);
+    DIR* dir = opendir(sm64_dir);
     if (dir == NULL) {
         return;
     }
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (strncmp(entry->d_name, name, prefix) != 0 || strcmp(entry->d_name, name) == 0) {
+        if (strncmp(entry->d_name, "states-", strlen("states-")) != 0 || strcmp(entry->d_name, name) == 0) {
             continue;
         }
-        char other[1300];
-        snprintf(other, sizeof(other), "%s/%s", directory, entry->d_name);
+        char other[1400];
+        snprintf(other, sizeof(other), "%s/%s", sm64_dir, entry->d_name);
         DIR* states = opendir(other);
         if (states == NULL) {
             continue;
@@ -1262,7 +1273,7 @@ static void sm64_remove_other_states(const char* keep) {
         while ((state = readdir(states)) != NULL) {
             int frame;
             if (sscanf(state->d_name, "%d.state", &frame) == 1) {
-                char path[1600];
+                char path[1700];
                 snprintf(path, sizeof(path), "%s/%s", other, state->d_name);
                 remove(path);
             }
@@ -1278,33 +1289,16 @@ static void sm64_demo_load(SM64* env) {
     if (sm64_demo == NULL) {
         const char* path = sm64_demo_path();
         sm64_demo = sm64_demo_read(path, &sm64_demo_count, &sm64_demo_frames);
-        /* A star with no touch on file yet works back along the fastest spawn
-         * kept while that was the goal: the same route as far as the box. Its
-         * frames end where the star spawns, so an episode from its end has
-         * DEMO_SLACK to wait out the cutscene and take the star, and the first
-         * touch from anywhere on it is the touch demo. */
-        if (sm64_demo == NULL && env->star) {
-            path = sm64_star_spawn_demo;
-            sm64_demo = sm64_demo_read(path, &sm64_demo_count, &sm64_demo_frames);
-            if (sm64_demo != NULL) {
-                fprintf(stderr, "sm64: no touch of the star on file yet; working back along the spawn in %s\n", path);
-            }
-        }
         if (sm64_demo == NULL) {
-            fprintf(stderr, "sm64: backward needs a door to work back from, and there is none in %s.\n"
-                            "      Explore first: ./build/sm64_tool explore\n", path);
+            fprintf(stderr, "sm64: backward works back along the fastest run to the star, and there is none in %s.\n"
+                            "      Find one first: make sm64-explore STAR=%s\n", path, env->goal.name);
             exit(1);
         }
         int first = env->backward_start > 0 ? env->backward_start : env->backward_step > 0 ? env->backward_step : 1;
         sm64_frontier = first < sm64_demo_frames ? first : sm64_demo_frames;
-        /* door.demo -> door-states-9a3c1e2b/, named for this demo's inputs, so
-         * another demo's states are never mistaken for its own. The states of
-         * demos this one has replaced are 8 MB each and no use now, so they go. */
-        size_t stem = strlen(path);
-        if (stem >= 5 && strcmp(path + stem - 5, ".demo") == 0) {
-            stem -= 5;
-        }
-        snprintf(sm64_demo_states, sizeof(sm64_demo_states), "%.*s-states-%08x", (int)stem, path,
+        /* states-9a3c1e2b/, named for this demo's inputs, so another demo's
+         * states are never mistaken for its own. */
+        snprintf(sm64_demo_states, sizeof(sm64_demo_states), "%s/states-%08x", sm64_dir,
                  sm64_inputs_hash(sm64_demo, sm64_demo_count));
         sm64_remove_other_states(sm64_demo_states);
     }
@@ -1328,7 +1322,7 @@ static void sm64_demo_go(SM64* env) {
     if (env->trail_count == 0) {
         return; /* the savestate itself, which reset has just loaded */
     }
-    char path[1200];
+    char path[1300];
     snprintf(path, sizeof(path), "%s/%05d.state", sm64_demo_states, env->trail_frames);
     struct stat ignored;
     if (stat(path, &ignored) == 0 && n64gym_load_state(&env->gym, path)) {
@@ -1346,7 +1340,7 @@ static void sm64_demo_go(SM64* env) {
     }
     sm64_replay_trail(env);
     mkdir(sm64_demo_states, 0755);
-    char temporary[1300];
+    char temporary[1400];
     snprintf(temporary, sizeof(temporary), "%s.%d", path, (int)env->rng);
     if (!n64gym_save_state(&env->gym, temporary) || rename(temporary, path) != 0) {
         fprintf(stderr, "sm64: could not keep the game at frame %d of the demo in %s\n", env->trail_frames, path);
@@ -1355,7 +1349,7 @@ static void sm64_demo_go(SM64* env) {
 }
 
 /* Start on the demo: at the frontier, or, half the time, at any of the
- * frontiers already passed, nearer the door. Starts are on the frontier's grid
+ * frontiers already passed, nearer the star. Starts are on the frontier's grid
  * of backward_step frames, so there are as many places to start as there are
  * frontiers, and as many states to keep (see sm64_demo_go). */
 static void sm64_demo_start(SM64* env) {
@@ -1385,37 +1379,38 @@ static void sm64_demo_start(SM64* env) {
     }
     sm64_demo_go(env);
 
-    /* The clock starts partway, so an episode has as long to reach the door as
+    /* The clock starts partway, so an episode has as long to reach the star as
      * the demo took from here plus DEMO_SLACK, never more than the whole clock,
      * and one that will not make it is over in about that long.
      *
-     * The second run started every one with the whole clock, 900 frames to get
-     * from a few seconds out. Most episodes ran all of it and paid -1, entropy
-     * fell to 0.01 by 260K steps, and the frontier never got past 120. The runs
-     * after that set the clock to what the demo's read at that point, and the
-     * two that trained stably stuck at 570: that far back, the explorer's
-     * wandering at the start of the demo had already spent a hundred frames,
-     * so an episode there had less time than one from the real start. */
+     * On the castle door, the second run started every one with the whole
+     * clock, 900 frames to get from a few seconds out. Most episodes ran all of
+     * it and paid -1, entropy fell to 0.01 by 260K steps, and the frontier never
+     * got past 120. The runs after that set the clock to what the demo's read at
+     * that point, and the two that trained stably stuck at 570: that far back,
+     * the explorer's wandering at the start of the demo had already spent a
+     * hundred frames, so an episode there had less time than one from the real
+     * start. */
     int budget = sm64_demo_frames - env->trail_frames + DEMO_SLACK;
     env->start_tick = budget < env->max_ticks ? env->max_ticks - budget : 0;
 }
 
 /* An episode that began on the demo is over: count it toward moving the frontier
  * back, if the frontier is still where it began. */
-static void sm64_demo_result(SM64* env, int door) {
+static void sm64_demo_result(SM64* env, int star) {
     pthread_mutex_lock(&sm64_demo_lock);
     if (env->start_frontier == sm64_frontier && sm64_frontier < sm64_demo_frames) {
         sm64_frontier_tries++;
-        sm64_frontier_doors += door;
+        sm64_frontier_stars += star;
         if (sm64_frontier_tries >= BACKWARD_WINDOW) {
-            if ((float)sm64_frontier_doors >= env->backward_rate * (float)sm64_frontier_tries) {
+            if ((float)sm64_frontier_stars >= env->backward_rate * (float)sm64_frontier_tries) {
                 sm64_frontier += env->backward_step > 0 ? env->backward_step : 1;
                 if (sm64_frontier > sm64_demo_frames) {
                     sm64_frontier = sm64_demo_frames;
                 }
             }
             sm64_frontier_tries = 0;
-            sm64_frontier_doors = 0;
+            sm64_frontier_stars = 0;
         }
     }
     pthread_mutex_unlock(&sm64_demo_lock);
@@ -1430,14 +1425,14 @@ static void sm64_demo_result(SM64* env, int door) {
  * and make the other.
  *
  * With go_explore_seed on, the first game to start plays every run on file once
- * -- the demo, the folder of the fastest, and any kept by hand in a folder
- * beside them, <demo>-seeds/ -- and offers each cube on the way
- * to the archive, as the episode that found it did, then credits those cubes as
- * on the way to the goal, which they are. The archive keeps the shortest way to
- * a cube, so what a run starts with is the best of all of them at every place,
- * and half its archive starts are along them from the first episode.
+ * -- the demo, the fastest/ folder, and any kept by hand in seeds/ -- and offers
+ * each cube on the way to the archive, as the episode that found it did, then
+ * credits those cubes as on the way to the star, which they are. The archive
+ * keeps the shortest way to a cube, so what a run starts with is the best of
+ * all of them at every place, and half its archive starts are along them from
+ * the first episode.
  *
- * A run stops being offered the step it reaches the goal, as an episode does:
+ * A run stops being offered the step it reaches the star, as an episode does:
  * a cube kept after that would start episodes with the star already his.
  */
 static int sm64_seeded;
@@ -1479,9 +1474,9 @@ static int sm64_seed_from(SM64* env, const char* path) {
         sm64_archive_offer(env, cube);
     }
     if (reached) {
-        sm64_credit_door(env, -1);
+        sm64_credit_star(env, -1);
     } else {
-        fprintf(stderr, "sm64: %s does not reach the goal when played; its cubes are kept, not credited\n", path);
+        fprintf(stderr, "sm64: %s does not reach the star when played; its cubes are kept, not credited\n", path);
     }
     free(inputs);
     return 1;
@@ -1503,20 +1498,15 @@ static void sm64_archive_seed(SM64* env) {
 
         int runs = sm64_seed_from(env, sm64_demo_path());
         for (int k = 0; k < listed; k++) {
-            char path[1100];
+            char path[1200];
             snprintf(path, sizeof(path), "%s/%s", sm64_fastest_dir, names[k]);
             runs += sm64_seed_from(env, path);
         }
-        /* And any run kept by hand beside them, in <demo>-seeds/. The folder of
-         * the fastest drops a run once ten are faster, and with it whatever only
-         * that run had: a way over the top, a line through a turn. */
+        /* And any run kept by hand in seeds/. The folder of the fastest drops a
+         * run once ten are faster, and with it whatever only that run had: a way
+         * over the top, a line through a turn. */
         char seeds[1100];
-        const char* demo = sm64_demo_path();
-        size_t stem = strlen(demo);
-        if (stem >= 5 && strcmp(demo + stem - 5, ".demo") == 0) {
-            stem -= 5;
-        }
-        snprintf(seeds, sizeof(seeds), "%.*s-seeds", (int)stem, demo);
+        snprintf(seeds, sizeof(seeds), "%s/seeds", sm64_dir);
         DIR* dir = opendir(seeds);
         if (dir != NULL) {
             struct dirent* entry;
@@ -1530,8 +1520,8 @@ static void sm64_archive_seed(SM64* env) {
             }
             closedir(dir);
         }
-        fprintf(stderr, "sm64: the archive starts with %d cubes, %d of them on the way to the goal, from %d runs on file\n",
-                sm64_archive_size, sm64_door_cube_count, runs);
+        fprintf(stderr, "sm64: the archive starts with %d cubes, %d of them on the way to the star, from %d runs on file\n",
+                sm64_archive_size, sm64_star_cube_count, runs);
         n64gym_draw(&env->gym, N64B_GYM_DRAW_LAST_FRAME);
         if (!n64gym_load_state(&env->gym, sm64_state_path())) {
             fprintf(stderr, "sm64: could not put the game back after seeding the archive: %s\n", env->gym.error);
@@ -1566,12 +1556,10 @@ void init(SM64* env) {
     /* Only the frame at the end of a step is ever seen, and Super Mario 64 draws
      * every frame from nothing, so the others are not drawn. */
     n64gym_draw(&env->gym, N64B_GYM_DRAW_LAST_FRAME);
-    env->star = sm64_star_goal();
-    env->goal_level = sm64_star_level();
-    env->goal_act = sm64_star_act();
     env->entered = (uint32_t*)calloc(NOVELTY_CUBES, sizeof(uint32_t));
     env->seed = 0x9E3779B9u ^ (env->rng * 2654435761u);
     env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
+    sm64_use_goal(&env->goal);
     if (env->backward > 0.0f) {
         sm64_demo_load(env);
     }
@@ -1579,12 +1567,12 @@ void init(SM64* env) {
     const char* state = sm64_state_path();
     struct stat ignored;
     if (stat(state, &ignored) != 0) {
-        /* Nobody has played through the intro yet. Do it once, here, and every
+        /* Nobody has been to this star yet. Get there once, here, and every
          * episode of every run from now on starts from it. */
         char error[256];
-        fprintf(stderr, "sm64: playing through the intro once to make %s\n", state);
-        if (!sm64_make_state(&env->gym, state, env->star, env->goal_level, env->goal_act, error,
-                             sizeof(error))) {
+        fprintf(stderr, "sm64: playing through the intro and into %s once, to make %s\n", env->goal.course->title,
+                state);
+        if (!sm64_make_state(&env->gym, state, &env->goal, error, sizeof(error))) {
             fprintf(stderr, "sm64: %s\n", error);
             exit(1);
         }
@@ -1602,14 +1590,13 @@ void init(SM64* env) {
         exit(1);
     }
     env->mario = n64_u32(&env->gym, MARIO_STATE_PTR);
-    env->stars_at_start = n64_s16(&env->gym, env->mario + M_NUM_STARS);
-    if (sm64_level(env) != sm64_home_level(env)) {
-        fprintf(stderr, "sm64: %s does not start where this goal does; delete it to make it again\n", state);
-        exit(1);
-    }
-    if (env->star && n64_s16(&env->gym, CURR_ACT_NUM) != env->goal_act) {
-        fprintf(stderr, "sm64: %s is act %d and SM64_ACT asks for %d; delete it to make it again\n", state,
-                n64_s16(&env->gym, CURR_ACT_NUM), env->goal_act);
+    env->star_flags_at_start = sm64_star_flags(env);
+    if (sm64_level(env) != env->goal.course->level || n64_s16(&env->gym, CURR_COURSE_NUM) != env->goal.course->course ||
+        (env->goal.act > 0 && n64_s16(&env->gym, CURR_ACT_NUM) != env->goal.act)) {
+        fprintf(stderr, "sm64: %s is level %d course %d act %d, where %s is level %d course %d act %d;"
+                        " delete it to make it again\n",
+                state, sm64_level(env), n64_s16(&env->gym, CURR_COURSE_NUM), n64_s16(&env->gym, CURR_ACT_NUM),
+                env->goal.name, env->goal.course->level, env->goal.course->course, env->goal.act);
         exit(1);
     }
     if (env->go_explore > 0.0f && env->go_explore_seed) {
@@ -1767,7 +1754,6 @@ void puf_reset(SM64* env) {
     env->deaths = 0;
     env->last_x = sm64_pos(env, 0);
     env->last_z = sm64_pos(env, 2);
-    env->closest = sm64_goal_distance(env, env->last_x, env->last_z);
     env->episode++;
     env->novelty_earned = 0.0f;
     env->ghost_earned = 0.0f;
@@ -1802,29 +1788,28 @@ static void sm64_respawn(SM64* env) {
     env->last_z = sm64_pos(env, 2);
 }
 
-enum { ENDED_CLOCK, ENDED_DOOR, ENDED_EARLY };
+enum { ENDED_CLOCK, ENDED_STAR, ENDED_EARLY };
 
 static void sm64_end_episode(SM64* env, int how) {
     float frames = (float)(env->tick > env->start_tick ? env->tick - env->start_tick : 1);
-    int door = how == ENDED_DOOR;
-    env->log.perf += (float)door;
-    env->log.score += door ? 1.0f - (float)env->tick / (float)env->max_ticks : 0.0f;
+    int star = how == ENDED_STAR;
+    env->log.perf += (float)star;
+    env->log.score += star ? 1.0f - (float)env->tick / (float)env->max_ticks : 0.0f;
     env->log.episode_return += env->episode_return;
     env->log.episode_length += (float)env->steps;
-    env->log.frames += door ? (float)env->tick : (float)env->max_ticks;
-    env->log.closest += door ? 0.0f : env->closest;
+    env->log.frames += star ? (float)env->tick : (float)env->max_ticks;
     env->log.novelty += env->novelty_earned;
     env->log.ghost += env->ghost_earned;
     env->log.cells += (float)env->cells_entered;
     env->log.explored += (float)sm64_cubes_explored;
     env->log.from_start += (float)env->from_start;
-    env->log.start_perf += (float)(door && env->from_start);
+    env->log.start_perf += (float)(star && env->from_start);
     env->log.archive += (float)sm64_archive_size;
     env->log.replayed += (float)env->replayed_frames;
-    env->log.door_cubes += (float)sm64_door_cube_count;
+    env->log.star_cubes += (float)sm64_star_cube_count;
     env->log.frontier += (float)sm64_frontier;
     if (env->start_frontier >= 0) {
-        sm64_demo_result(env, door);
+        sm64_demo_result(env, star);
     }
     env->log.distance += env->distance;
     env->log.top_speed += env->top_speed;
@@ -1868,11 +1853,10 @@ void puf_step(SM64* env) {
     uint32_t action = sm64_action(env);
     float step_cost = env->time_penalty * (float)env->frameskip / (float)env->max_ticks;
 
-    /* The door, the frame it starts to open, or the star, the frame he touches
-     * it. The warp inside or the star's dance comes after, and is the same for
-     * every run, so it is not counted. */
+    /* The star, the frame he touches it. The dance and the warp out come after,
+     * and are the same for every run, so they are not counted. */
     if (sm64_goal_reached(env)) {
-        agent->rewards[0] = DOOR_REWARD - step_cost;
+        agent->rewards[0] = STAR_REWARD - step_cost;
         env->episode_return += agent->rewards[0];
         sm64_fastest_offer(env);
         /* An exploring run offers its way to the demo, and so does a
@@ -1884,12 +1868,12 @@ void puf_step(SM64* env) {
             sm64_demo_offer(env);
         }
         if (env->go_explore > 0.0f) {
-            sm64_credit_door(env, sm64_cube(env, sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2)));
+            sm64_credit_star(env, sm64_cube(env, sm64_pos(env, 0), sm64_pos(env, 1), sm64_pos(env, 2)));
         }
-        sm64_end_episode(env, ENDED_DOOR);
+        sm64_end_episode(env, ENDED_STAR);
         return;
     }
-    /* A death, or any other way out of the castle grounds (or the course), is
+    /* A death, or any other way out of the course -- another star included -- is
      * not the goal, and it must not be a way to stop the clock either: it pays
      * for the rest of the clock at once, the same as running it out.
      *
@@ -1900,7 +1884,7 @@ void puf_step(SM64* env) {
      * anything -- in Whomp's Fortress, 70% of episodes ended in a death, most
      * inside the first half of the clock, and each one that did explored a third
      * of what a full episode does. */
-    if (sm64_level(env) != sm64_home_level(env) || n64_s16(&env->gym, env->mario + M_HEALTH) < 0x100) {
+    if (sm64_level(env) != env->goal.course->level || n64_s16(&env->gym, env->mario + M_HEALTH) < 0x100) {
         if (env->respawn) {
             sm64_respawn(env);
             agent->rewards[0] = -step_cost;
@@ -1940,7 +1924,6 @@ void puf_step(SM64* env) {
 
     agent->rewards[0] = -step_cost + sm64_novelty(env, x, sm64_pos(env, 1), z);
     env->episode_return += agent->rewards[0];
-    env->closest = fminf(env->closest, sm64_goal_distance(env, x, z));
 
     if (env->tick >= env->max_ticks) {
         sm64_end_episode(env, ENDED_CLOCK);
@@ -1986,6 +1969,12 @@ void puf_close(SM64* env) {
 /* Required function: read this env's settings from [env] in its config, and start its game */
 void puf_init(Env* env, Dict* kwargs) {
     env->num_agents = 1;
+    char error[512];
+    if (!sm64_goal_parse(dict_get_str(kwargs, "star"), (int)dict_get(kwargs, "act"), &env->goal, error,
+                         sizeof(error))) {
+        fprintf(stderr, "sm64: [env] star: %s\n", error);
+        exit(1);
+    }
     env->frameskip = (int)dict_get(kwargs, "frameskip");
     env->max_ticks = (int)dict_get(kwargs, "max_ticks");
     env->random_start = (int)dict_get(kwargs, "random_start");
@@ -1995,7 +1984,7 @@ void puf_init(Env* env, Dict* kwargs) {
     env->novelty_cell = (float)dict_get(kwargs, "novelty_cell");
     env->respawn = (int)dict_get(kwargs, "respawn");
     env->go_explore = (float)dict_get(kwargs, "go_explore");
-    env->go_explore_door = (float)dict_get(kwargs, "go_explore_door");
+    env->go_explore_star = (float)dict_get(kwargs, "go_explore_star");
     env->go_explore_seed = (int)dict_get(kwargs, "go_explore_seed");
     env->ghost = (float)dict_get(kwargs, "ghost");
     env->backward = (float)dict_get(kwargs, "backward");
@@ -2017,7 +2006,6 @@ void puf_log(Log* log, Dict* out) {
     dict_set(out, "episode_return", log->episode_return);
     dict_set(out, "episode_length", log->episode_length);
     dict_set(out, "frames", log->frames);
-    dict_set(out, "closest", log->closest);
     dict_set(out, "novelty", log->novelty);
     dict_set(out, "ghost", log->ghost);
     dict_set(out, "cells", log->cells);
@@ -2026,7 +2014,7 @@ void puf_log(Log* log, Dict* out) {
     dict_set(out, "start_perf", log->start_perf);
     dict_set(out, "archive", log->archive);
     dict_set(out, "replayed", log->replayed);
-    dict_set(out, "door_cubes", log->door_cubes);
+    dict_set(out, "star_cubes", log->star_cubes);
     dict_set(out, "frontier", log->frontier);
     dict_set(out, "distance", log->distance);
     dict_set(out, "top_speed", log->top_speed);

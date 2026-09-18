@@ -1,4 +1,4 @@
-.PHONY: setup trainer test bench build play train eval sm64 sm64-state sm64-train sm64-watch sm64-demo sm64-bench sm64-explore sm64-robustify sm64-slide sm64-slide-explore sm64-slide-robustify sm64-slide-watch sm64-picture
+.PHONY: setup trainer test bench build play train eval sm64 sm64-state sm64-train sm64-explore sm64-robustify sm64-picture sm64-watch sm64-replay sm64-demo sm64-bench
 
 # Which env to build and train. Each builds into a library of its own
 # (build/vecenv_<env>.dylib, or .so), so building one leaves the others as they are.
@@ -46,84 +46,71 @@ eval: build
 # The game is your own sm64.z64, Super Mario 64 (USA), at the top of this checkout
 # or wherever SM64_ROM says. The first build fetches N64Bundler (vendor/n64bundler),
 # builds it and recompiles the game with it; N64BUNDLER names another checkout.
+#
+# Every target is about one star, STAR: <course>-<number> as the game numbers a
+# course's stars (pss-2, wf-1, bob-7), or a course alone for any star in it.
+# `./build/sm64_tool courses` lists the courses; without STAR it is the star
+# sm64.ini names. A star with settings of its own -- a longer clock, respawning --
+# has them in envs/sm64/stars/$(STAR).ini, which goes over sm64.ini; any other
+# star needs no file. A star keeps its savestate, demos and seeds in
+# build/sm64/$(STAR)/, and its checkpoints and logs in checkpoints/$(STAR)/ and
+# logs/$(STAR)/, so `latest` is that star's most trained policy.
+STAR ?= $(shell sed -n 's/^star *= *\([a-z0-9-]*\).*/\1/p' envs/sm64/sm64.ini)
+STAR_INI = envs/sm64/stars/$(STAR).ini
+STAR_CONFIG = $(if $(wildcard $(STAR_INI)),--config $(STAR_INI)) --env.star $(STAR)
+STAR_RUN = $(STAR_CONFIG) --base.checkpoint-dir checkpoints/$(STAR) --base.log-dir logs/$(STAR)
 
 sm64: trainer
 	./build.sh sm64
 
-# Play through the title, the file select and Peach's letter once, and save the
-# castle grounds. Every episode starts from this. Made automatically on the
-# first run; this remakes it.
+# Get into the star's course and save the game there. Every episode starts from
+# this. Made automatically the first time a star is trained; this remakes it.
 sm64-state: sm64
-	./build/sm64_tool state
+	./build/sm64_tool state $(STAR_CONFIG)
 
-sm64-train: sm64 sm64-state
-	$(PUFFERL) train sm64 $(ARGS)
+# The star, the clock and novelty, explored with Go-Explore
+sm64-train: sm64
+	$(PUFFERL) train sm64 $(STAR_RUN) $(ARGS)
 
 # Go-Explore's first phase with no policy: random play from the archive until it
-# has opened the door, keeping the fastest run in build/sm64/door.demo
+# has the star, keeping the fastest run in build/sm64/$(STAR)/fastest.demo
 sm64-explore: sm64
-	./build/sm64_tool explore $(or $(GAMES),8) $(or $(SECONDS),600) $(or $(FRAMES),900)
+	./build/sm64_tool explore $(or $(GAMES),8) $(or $(SECONDS),600) $(STAR_CONFIG)
 
-# Go-Explore's second phase: train a policy to open the door from the real
-# start, working back along that demo. Only the door and the clock pay.
-# Entropy is bought at a fixed price rather than held at sm64.ini's target,
-# and the learning rate is a third of PufferLib's 0.015: see the README
+# Go-Explore's second phase: train a policy to get the star from the real start,
+# working back along that run, with only the star and the clock paying. Every
+# star it gets faster than the run becomes the run for the next time.
+# Advantages are normalized (norm_adv), which is 4.0's and not 5.0's: without it
+# the slide learned nothing in 1.5M steps. The discount is 0.999 rather than
+# 5.0's 0.995, at which a star 400 frames off is worth a third. Entropy is bought
+# at a fixed price rather than held at sm64.ini's target, and the learning rate
+# is a third of PufferLib's 0.015: see the README.
 sm64-robustify: sm64
-	$(PUFFERL) train sm64 --env.backward 0.8 --env.go-explore 0 \
-		--env.novelty 0 --env.novelty-episode 0 \
-		--train.target-entropy 0 --train.ent-coef 0.01 --train.learning-rate 0.005 $(ARGS)
-
-# Race to the star at the bottom of Peach's Secret Slide, where gravity does
-# most of the work and the way to lose is to fall off. A death keeps the clock
-# and puts the game back rather than ending the episode. Everything else is the
-# usual reward: the star, the clock and novelty, explored with Go-Explore.
-#
-# The slide is about 1100 frames long at the pace an explorer slides it, so no
-# episode ever fit the star into the 900-frame clock: this course gets 1500, and
-# every frame of it still costs. Its checkpoints and logs are kept apart from the
-# door's, so `latest` here is the slide's most trained policy and not the door's.
-SLIDE = SM64_GOAL=star SM64_LEVEL=27
-SLIDE_ARGS = --env.respawn 1 --env.max-ticks 1500 --base.checkpoint-dir checkpoints/slide --base.log-dir logs/slide
-sm64-slide: sm64
-	$(SLIDE) $(PUFFERL) train sm64 $(SLIDE_ARGS) $(ARGS)
-
-# Go-Explore's first phase on the slide, with no policy: random sliding from the
-# archive until it has a star, keeping the fastest in build/sm64/star-level27-act0.demo
-sm64-slide-explore: sm64
-	$(SLIDE) ./build/sm64_tool explore $(or $(GAMES),8) $(or $(SECONDS),600) $(or $(FRAMES),1500)
-
-# Go-Explore's second phase on the slide: train a policy to reach the star from
-# the top, working back along that demo, with only the star and the clock
-# paying. Every star it gets faster than the demo becomes the demo for the next
-# run. Advantages are normalized (norm_adv), which is 4.0's and not 5.0's:
-# without it this learned nothing in 1.5M steps. The star is 750 steps from the
-# top at most, so the discount is 0.999 rather than 5.0's 0.995, at which a star
-# 400 frames off is worth a third. See the README.
-sm64-slide-robustify: sm64
-	$(SLIDE) $(PUFFERL) train sm64 $(SLIDE_ARGS) --env.backward 0.8 --env.go-explore 0 \
+	$(PUFFERL) train sm64 $(STAR_RUN) --env.backward 0.8 --env.go-explore 0 \
 		--env.novelty 0 --env.novelty-episode 0 \
 		--train.target-entropy 0 --train.ent-coef 0.005 --train.learning-rate 0.005 \
 		--train.norm-adv 1 --train.gamma 0.999 --train.gae-lambda 0.95 --train.minibatch-size 1024 $(ARGS)
-
-# Watch the slide's most trained checkpoint start at the top and go for the star
-sm64-slide-watch: sm64
-	$(SLIDE) $(PUFFERL) eval sm64 latest $(SLIDE_ARGS) --env.window 1 --env.go-explore 0 \
-		--env.novelty 0 --env.novelty-episode 0 $(ARGS)
 
 # Train with the policy looking at the game: an 80 by 60 picture of it in the
 # observation, through a small convolutional net. About a quarter of the speed.
 # Watch one with: make sm64-watch ARGS="--env.picture-width 80 --env.picture-height 60"
 sm64-picture: sm64
-	$(PUFFERL) train sm64 --env.picture-width 80 --env.picture-height 60 $(ARGS)
+	$(PUFFERL) train sm64 $(STAR_RUN) --env.picture-width 80 --env.picture-height 60 $(ARGS)
 
-# Watch the most trained checkpoint play, in a window, at the speed a console ran
+# Watch the star's most trained checkpoint start where the task does and go for
+# it, in a window, at the speed a console ran
 sm64-watch: sm64
-	$(PUFFERL) eval sm64 latest --env.window 1 --env.go-explore 0 $(ARGS)
+	$(PUFFERL) eval sm64 latest $(STAR_RUN) --env.window 1 --env.go-explore 0 \
+		--env.novelty 0 --env.novelty-episode 0 $(ARGS)
+
+# Watch the fastest run to the star on file
+sm64-replay: sm64
+	./build/sm64_tool replay watch $(STAR_CONFIG)
 
 # The game with no policy at all: hold forward and jump, in a window
 sm64-demo: sm64
-	./build/sm64_tool watch forward
+	./build/sm64_tool watch forward $(STAR_CONFIG)
 
 # How many agent steps a second this machine manages, with N games at once
 sm64-bench: sm64
-	./build/sm64_tool bench $(or $(GAMES),8) 400
+	./build/sm64_tool bench $(or $(GAMES),8) 400 $(STAR_CONFIG)

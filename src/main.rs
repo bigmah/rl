@@ -5,7 +5,7 @@ use pufferl::config::load_config;
 use pufferl::gpu::Gpu;
 use pufferl::pufferl::{run_eval, run_train};
 
-const USAGE: &str = "usage: pufferl train|eval ENV [latest|MODEL.bin] [--headless] [--section.key=value ...]";
+const USAGE: &str = "usage: pufferl train|eval ENV [latest|MODEL.bin] [--headless] [--config FILE ...] [--section.key=value ...]";
 
 /// Where envs/, build/ and vendor/PufferLib are: PUFFERL_ROOT, or the directory this was
 /// run from, or one above the binary's own, which is where cargo leaves it.

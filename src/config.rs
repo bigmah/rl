@@ -170,6 +170,21 @@ impl Ini {
         }
     }
 
+    /// Another config file's values over these. Like a flag, it can only set keys this one
+    /// already has, so a misspelt key is an error rather than a setting nobody reads.
+    pub fn overlay(&mut self, path: &Path) {
+        let mut other = Ini::default();
+        other.load(path);
+        for (section, keys) in other.sections {
+            for (key, raw) in keys {
+                if self.raw(&section, &key).is_none() {
+                    crate::fail(&format!("{}: [{section}] {key} is not a key the config has", path.display()));
+                }
+                self.put(&format!("{section}.{key}"), &raw);
+            }
+        }
+    }
+
     pub fn write(&self, out: &mut String) {
         for (section, keys) in &self.sections {
             out.push_str(&format!("\n[{section}]\n"));
@@ -180,8 +195,12 @@ impl Ini {
     }
 }
 
-/// default.ini, then envs/ENV/ENV.ini, then --section.key=value (or --section.key value) from
-/// the command line. A key with no section is in [base], and dashes in a key are underscores.
+/// default.ini, then envs/ENV/ENV.ini, then each --config FILE in the order given, then
+/// --section.key=value (or --section.key value) from the command line, wherever they are in
+/// it. A key with no section is in [base], and dashes in a key are underscores.
+///
+/// A --config file is a variant of the env's config -- sm64's stars/pss-2.ini, the one star's
+/// clock and respawn -- and may only set keys the configs before it have, as a flag may.
 pub fn load_config(root: &Path, env_name: &str, argv: &[String]) -> Ini {
     let env_config = root.join("envs").join(env_name).join(format!("{env_name}.ini"));
     if !env_config.exists() {
@@ -192,6 +211,7 @@ pub fn load_config(root: &Path, env_name: &str, argv: &[String]) -> Ini {
     ini.load(&env_config);
     ini.put("base.env_name", env_name);
 
+    let mut flags = Vec::new();
     let mut i = 0;
     while i < argv.len() {
         let arg = &argv[i];
@@ -208,9 +228,15 @@ pub fn load_config(root: &Path, env_name: &str, argv: &[String]) -> Ini {
             None => (arg, "true".to_string()),
         };
         let key = key.replace('-', "_");
-        let full = if key.contains('.') { key } else { format!("base.{key}") };
-        ini.put(&full, &value);
+        if key == "config" {
+            ini.overlay(Path::new(&value));
+        } else {
+            flags.push((if key.contains('.') { key } else { format!("base.{key}") }, value));
+        }
         i += 1;
+    }
+    for (key, value) in flags {
+        ini.put(&key, &value);
     }
     ini
 }
@@ -228,6 +254,26 @@ mod tests {
         assert_eq!(parse("3,4,5"), Value::List(vec![3.0, 4.0, 5.0]));
         assert_eq!(parse("None"), Value::Str("None".into()));
         assert_eq!(parse("score "), Value::Str("score ".into()));
+    }
+
+    /// A --config file goes over the env's config, and flags over both, wherever they are
+    #[test]
+    fn overlays() {
+        let root = std::env::temp_dir().join(format!("pufferl-config-{}", std::process::id()));
+        fs::create_dir_all(root.join("vendor/PufferLib/config")).unwrap();
+        fs::create_dir_all(root.join("envs/toy")).unwrap();
+        fs::write(root.join("vendor/PufferLib/config/default.ini"), "[base]\nenv_name = None\n[env]\n").unwrap();
+        fs::write(root.join("envs/toy/toy.ini"), "[env]\nstar = a\nclock = 900\nrespawn = 0\n").unwrap();
+        let variant = root.join("b.ini");
+        fs::write(&variant, "[env]\nstar = b\nclock = 1500\n").unwrap();
+        let args: Vec<String> = ["--env.clock", "2000", "--config", variant.to_str().unwrap()]
+            .iter().map(|arg| arg.to_string()).collect();
+        let ini = load_config(&root, "toy", &args);
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(ini.raw("env", "star"), Some("b"));
+        assert_eq!(ini.raw("env", "clock"), Some("2000"));
+        assert_eq!(ini.raw("env", "respawn"), Some("0"));
+        assert_eq!(ini.raw("base", "env_name"), Some("toy"));
     }
 
     #[test]

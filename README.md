@@ -16,37 +16,46 @@ Rewards: progress toward the flag (1.0 for the whole run), +1 for the flag, and 
 
 ## Super Mario 64
 
-`envs/sm64/` is the real cartridge as an environment, and the goal is to **open the castle's front door as soon as possible**, starting from the castle grounds.
+`envs/sm64/` is the real cartridge as an environment, and the goal is to **get one star as soon as possible**, starting where the star's course drops Mario. Which star is config.
 
 The game is not emulated and not reimplemented. [N64Bundler](https://github.com/bigmah/n64bundler) statically recompiles `sm64.z64` into native code for the machine it is on and runs it in `n64b-run`; this env starts one of those per agent, in a process of its own, and reads Mario out of the console's memory — which is mapped into both processes, so an observation is a load rather than a request.
 
-- `sm64.h`: where the game keeps Mario, what an action does to the controller, the reward, and the `puf_*` functions PufferLib calls
+- `sm64.h`: the courses, how Mario gets into one, where the game keeps him, what an action does to the controller, the reward, and the `puf_*` functions PufferLib calls
 - `n64b_gym.h`: starting a game, stepping it, saving and loading its state
-- `sm64.c`: the env without the trainer — make the savestate, watch it, benchmark it, explore without a policy, replay the demo
+- `sm64.c`: the env without the trainer — make a star's savestate, watch it, benchmark it, explore without a policy, replay a run
 - `sm64.ini`: env and training config, on top of PufferLib's `config/default.ini`
+- `stars/<star>.ini`: a star's own settings, over `sm64.ini`, for the stars that need any
 
 ```sh
 cp ~/roms/sm64.z64 .  # your own dump of the cartridge (USA): the only thing this needs from you
-make sm64-state       # play through the intro once and save the castle grounds
-make ENV=sm64 train   # 8 copies of the game, ~9000 agent steps a second
-make sm64-watch       # watch the latest checkpoint play, in a window
-make sm64-demo        # no policy at all: hold forward and jump
-./build/sm64_tool probe door   # a scripted walk to the door, printing the reward
-make sm64-explore     # Go-Explore phase 1 with no policy: find the door, keep the fastest run
-./build/sm64_tool replay       # check that run still opens the door (add `watch` to see it)
-SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay watch build/sm64/star-level27-act0-fastest/00936-3441af34.demo
-                               # any of the ten fastest runs to the goal, kept by any run, training or exploring
-SM64_TRACE=30 ./build/sm64_tool replay         # and where Mario is every thirty frames of the way
-make sm64-robustify   # Go-Explore phase 2: train a policy to open it from the real start
-make sm64-slide       # a different goal: the star at the bottom of Peach's Secret Slide
-make sm64-slide-explore    # phase 1 on the slide: random sliding from the archive, keeping the fastest star
-make sm64-slide-robustify  # phase 2 on the slide: a policy that reaches the star from the top
-make sm64-slide-watch      # watch its most trained checkpoint go for the star
+make sm64-train               # train on the star sm64.ini names (pss-2); 8 copies of the game
+make sm64-train STAR=wf-1     # or any other: Whomp's Fortress's first star
+make sm64-watch STAR=wf-1     # watch that star's latest checkpoint play, in a window
+make sm64-explore STAR=wf-1   # Go-Explore phase 1 with no policy: find the star, keep the fastest run
+make sm64-replay STAR=wf-1    # watch the fastest run to it on file
+make sm64-robustify STAR=wf-1 # Go-Explore phase 2: a policy that gets the star from the real start
+make sm64-demo STAR=wf-1      # no policy at all: hold forward and jump
+./build/sm64_tool courses     # the courses, and the names their stars go by
+./build/sm64_tool replay watch build/sm64/pss-2/fastest/00662-25827173.demo --env.star pss-2
+                              # any of the ten fastest runs to a star, kept by any run, training or exploring
+SM64_TRACE=30 ./build/sm64_tool replay --env.star pss-2   # and where Mario is every thirty frames of the way
 ```
 
 All it needs from you is your own dump of the cartridge, Super Mario 64 (USA): put it at `sm64.z64` in the top of the checkout, or point `SM64_ROM` at it. The first sm64 build fetches N64Bundler (a submodule at `vendor/n64bundler`), builds it, and recompiles the cartridge with it into `build/sm64/game/`: a few minutes for RT64, the renderer, and seconds for the game, once. Set `N64BUNDLER` to build against another checkout of it. No game data is copied into this repository, and everything derived from it lands in the gitignored `build/`.
 
 Every training result in the sections below came from the PufferLib 4.0 trainer, and `sm64.ini` is still tuned for it. 5.0 trains differently enough that those settings learn far more slowly: see *Against the 4.0 port*.
+
+### Picking a star
+
+A star is `<course>-<number>`, numbered the way the act select and the save file number a course's stars: `wf-1` is Whomp's Fortress's first, `bob-7` Bob-omb Battlefield's hundred coins, `pss-2` Peach's Secret Slide's second. A course alone, `bob`, is any star in it. `./build/sm64_tool courses` lists the 24 courses: the fifteen with an act select, the three Bowser courses, the slide, the three cap courses, Wing Mario Over the Rainbow and the Secret Aquarium.
+
+- **Config.** `star` in `[env]` names it (`sm64.ini` says `pss-2`). `make` targets take `STAR=`, and pass `--config envs/sm64/stars/<star>.ini` when that file exists: the slide's gives it a 1,500-frame clock and respawning, and Whomp's Fortress act 2's respawns. Any other star needs no file. `--config` is the trainer's, and works for any env: a config file over the env's own, which like a flag can only set keys the env's config has. The order is `default.ini`, the env's ini, each `--config`, then every flag.
+- **Getting there.** The first time a star is asked for, the env plays through the intro, points the castle's front door at the course's painting entry, walks Mario in, picks the star's act, and saves the game once he answers the pad (`sm64_tool state` remakes it). Stars 1 to 6 of a course with an act select are entered for their own act, and the hundred coins or any star for act 1; `[env] act` enters for another. Every one of the 24 courses makes its savestate from nothing this way, including the three Mario arrives in swimming or flying (Dire, Dire Docks, the Secret Aquarium, the Tower of the Wing Cap).
+- **What counts.** That star, the frame he touches it: its bit in the save file's star flags for the course goes on. Any other star isn't the goal, and taking it throws him out of the course, which is a death.
+- **What it keeps.** Everything is per star: `build/sm64/<star>/` has its savestate (`start.state`), the fastest run on file (`fastest.demo`), the ten fastest (`fastest/`), runs kept by hand to seed the archive (`seeds/`), and the frontier savestates of robustifying (`states-<hash>/`). `make` puts checkpoints and logs in `checkpoints/<star>/` and `logs/<star>/`, so `latest` is that star's policy. `SM64_DATA` points the per-star folders somewhere else, for a test run that shouldn't touch the real ones.
+- **The same config everywhere.** `sm64_tool` reads the config the trainer does and takes the same flags, so `./build/sm64_tool explore 8 600 --env.star wf-1` explores with the clock and settings training would use.
+
+The castle's front door was this env's first goal, and most of what follows was learned on it. It is gone now, along with `probe door`; the sections below keep what it taught.
 
 ### Measuring Mario's speed
 
@@ -65,18 +74,29 @@ MEM_W(0X50, ctx->r4) = ctx->f8.u32l;      // vel[2] = slideVelZ
 
 That gives `forwardVel` at `0x54`, the velocity vector at `0x48` and the facing angle at `0x2E` in one read, and position sits just before them at `0x3C`. `gMarioState` is the pointer at `0x8032D93C`, which points at `0x8033B170`. Each of them was then confirmed by watching the game: the stick arrives in `gControllers[0]`, Mario's action becomes `ACT_WALKING` (`0x04000440`) and then `ACT_JUMP` (`0x03000880`), and `gGlobalTimer` at `0x8032D5D4` ticks exactly once per frame the game draws.
 
-### The reward: time to the castle door
+### The reward: the star, the clock and novelty
 
-The door is two objects, its halves, at x −76 and 77, y 803, z −3155. They were found by searching memory for positions in front of the castle, then confirmed by walking into each one. Walking into the left half starts `ACT_PUSHING_DOOR` (`0x1321`) and the right half starts `ACT_PULLING_DOOR` (`0x1320`). Either way the game warps to the castle's inside (level 6) about forty frames later. **The episode ends the frame the door starts to open**, because the warp takes the same forty frames on every run.
+- **The star** pays 1, the most a step can pay once rewards are clipped, and ends the episode the frame Mario touches it.
+- **The clock.** Every frame costs `time_penalty / max_ticks`, so running out of time costs `time_penalty` in all. The sooner the star, the less of the clock was spent.
+- **Novelty.** The course is cut into cubes `novelty_cell` (500) units a side. The first time in an episode that Mario enters a cube, he is paid `novelty_episode + novelty / sqrt(n)`, where `novelty_episode` is 0.02, `novelty` is 0.05, and `n` counts the episodes, in all eight games, that have entered that cube (this one included). A cube with no floor under Mario isn't a place and pays nothing (see *Peach's Secret Slide*).
+- **Deaths and warps** out of the course charge whatever is left of the clock in one step, so neither is a way to stop it early, unless `respawn` puts the game back instead (see *What a death costs*). A death in a course throws Mario out of it; health dropping under `0x100` catches the frames before that.
 
-**The reward is the door, the clock, and novelty.**
+Nothing tells the policy where the star is or pays it for getting nearer. It sees what Mario is doing and where he is, and learns about the star by taking it.
 
-- **The door** pays 1, the most a step can pay once rewards are clipped.
-- **The clock.** Every frame costs `time_penalty / max_ticks`, so running out of time costs `time_penalty` in all. The sooner the door opens, the less of the clock was spent.
-- **Novelty.** The grounds are cut into cubes `novelty_cell` (500) units a side. The first time in an episode that Mario enters a cube, he is paid `novelty_episode + novelty / sqrt(n)`, where `novelty_episode` is 0.02, `novelty` is 0.05, and `n` counts the episodes, in all eight games, that have entered that cube (this one included).
-- **Deaths and warps** out of the castle grounds charge whatever is left of the clock in one step, so neither is a way to stop it early. A death doesn't change the level (Mario respawns in the castle grounds), so deaths are caught by health dropping under `0x100`.
+The log reports:
+- `perf`: the fraction of episodes that take the star.
+- `score`: the fraction of the clock left when he took it, or 0 if he didn't.
+- `frames`: frames to the star, or the whole clock without it. This is the number being minimized.
+- `novelty`, `cells` and `explored`: what novelty paid in the episode, how many cubes the episode entered, and how many cubes any game has ever entered.
+- `dialog` (frames in a cutscene), path length, `top_speed`, `forward_vel`, `airborne`, `ended_early` and `deaths`.
+- `from_start` and `start_perf`: the share of episodes that began where the task does, and the share that began there and took the star. `start_perf / from_start` is the star rate that counts.
+- `archive`, `replayed`, `star_cubes`, `ghost` and `frontier`: see Go-Explore, below.
 
-Nothing tells the policy where the door is or pays it for getting nearer. It sees what Mario is doing and where he is, and learns about the door by opening it.
+### History: the castle door
+
+The env's first goal was to open the castle's front door as soon as possible, from the castle grounds. It is gone, and so is its scripted walk (`probe door`), but the reward is shaped the way it is because of it.
+
+The door is two objects, its halves, at x −76 and 77, y 803, z −3155. Walking into the left half starts `ACT_PUSHING_DOOR` (`0x1321`) and the right half `ACT_PULLING_DOOR` (`0x1320`), and either way the game warps to the castle's inside about forty frames later. Its warp nodes are what the env now points at a course's painting entry to get Mario there.
 
 **Why novelty.** The door is 7,600 units away in a straight line, past a moat, over a bridge and through Lakitu, and it opens only for Mario walking into it. Here is how the door and the clock did on their own:
 - **Random play:** in 400 episodes of random buttons nobody opened the door, and only one got as far as Lakitu.
@@ -84,14 +104,14 @@ Nothing tells the policy where the door is or pays it for getting nearer. It see
 
 Nothing in that setup remembers where Mario has been, so exploring was just jittering the stick.
 
-**What novelty does.** Novelty is that memory, and it knows nothing about the door. It has two parts.
+**What novelty does.** Novelty is that memory, and it knows nothing about the goal. It has two parts.
 
 - **The fading part** (`novelty / sqrt(n)`) is for places nobody has been. The start, which every episode sees, is worth almost nothing within minutes, while a cube nobody has reached pays the full 0.05. On its own it found the door within 100K steps and then lost it. By 500K, the cubes on the way had been entered thousands of times and novelty had fallen from 0.7 an episode to 0.05. Episodes drifted back to the start, and in 5M steps the door opened only about five times, too rarely to learn the bridge, Lakitu and the door from.
 - **The per-episode part** (`novelty_episode`) never fades. An episode that covers ground is always worth more than one that doesn't, so the far side of the grounds keeps being reached, and the door with it. 0.02 a cube is about what running costs in clock. A run to the door (15 cubes, the door, and the clock left over) is still worth more than wandering all episode.
 
 Only the first entry in each episode counts, so pacing back and forth across a cube's edge earns nothing.
 
-The scripted walk to the door enters 22 cubes. In a fresh process it returns 1.96: 0.42 for the door and the clock, 0.44 from the per-episode part, and 1.10 from the fading part. Repeated in the same process, it returns 1.64 and then 1.50.
+The scripted walk to the door entered 22 cubes. In a fresh process it returned 1.96: 0.42 for the door and the clock, 0.44 from the per-episode part, and 1.10 from the fading part. Repeated in the same process, it returned 1.64 and then 1.50.
 
 **Entropy.** No fixed `ent_coef` worked with this reward. At 0.05 the policy sat at exactly uniform, learning nothing. At 0.005 it went out onto the bridge within 350K steps, then collapsed by 1M into a routine that barely moved. So the trainer can hold entropy at a `target_entropy` (2.5 here), raising the coefficient while the policy is more certain than that and lowering it while it is less. The setting is off by default.
 
@@ -101,29 +121,15 @@ An earlier version also paid for closing the straight-line distance to the door.
 
 Two things in the way were found by driving the game with a script. The door opens only for Mario walking into it: a dive bonks off, and a punch does nothing. And the first time Mario steps onto the bridge, Lakitu stops him to explain the camera, which is about 250 frames of dialog even with A mashed. The episode keeps going through the dialog (the policy has A), and the clock keeps running.
 
-`./build/sm64_tool probe door` walks to the foot of the bridge, then to the door, mashing A through Lakitu. It opens the door after 518 frames with a return of 1.52 (0.42 without the novelty of a fresh process), and 49% of those frames are dialog.
+A scripted walk to the foot of the bridge and then to the door, mashing A through Lakitu, opened it after 518 frames with a return of 1.52 (0.42 without the novelty of a fresh process), and 49% of those frames were dialog.
 
-The log reports:
-- `perf`: the fraction of episodes that open the door.
-- `score`: the fraction of the clock left when the door opened, or 0 if it didn't.
-- `frames`: frames to the door, or the whole clock if it stayed shut. This is the number being minimized.
-- `closest`: the nearest an episode without the door came to it. It is logged only; the policy never sees it. The bridge starts about 2,980 units from the door.
-- `novelty`, `cells` and `explored`: what novelty paid in the episode, how many cubes the episode entered, and how many cubes any game has ever entered.
-- `dialog`, path length, `top_speed`, `forward_vel` and `airborne`.
-- `from_start` and `start_perf`: the share of episodes that began where the task does, and the share that began there and opened the door. `start_perf / from_start` is the door rate that counts.
-- `archive`, `replayed`, `door_cubes` and `frontier`: see Go-Explore, below.
+### When a star is won, and which
 
-### Another course, and what a death costs
+A star is his the frame he touches it. A star that a box or a boss lets out, or that the slide awards for a time, is *spawned* first: it stops time, plays its cutscene for about a hundred frames while Mario stands frozen in whatever he was doing, and then lands where he can take it. For a while the spawn was the goal, which took the dead frames out of every success; the runs below up to the 648-frame slide were measured that way. But a star that has spawned is not yet won, and a policy that stops there has not learned to take it, so **the episode ends the frame he touches the star**. `sm64_tool replay` still says the frame a star spawned, from the game's time-stop flags in a halfword at `0x8033D482`, found by snapshotting the console's memory before and during the freeze and looking for the one word that goes from 0 to something and stays there — it goes to `0x4A`, which is time stop enabled (2), Mario and doors (8) and active (0x40), and a spawning star is what sets Mario-and-doors in a course (dialog sets a different bit; the doors that set it are in the castle). `./build/sm64_tool trim [file...]` replays runs, cuts them where the star is now taken, and writes them back — renaming a run in a fastest-runs folder for its new length — and `replay` says when a run wants trimming.
 
-`SM64_GOAL=star` races to a star instead of the door, and `SM64_LEVEL` and `SM64_ACT` say which one: 9 is Bob-omb Battlefield, 24 is Whomp's Fortress, 27 is Peach's Secret Slide. The castle door's warp nodes are pointed at that course's painting entry, and the act is written over the selected one while the course loads — a new save file offers only act 1, and the act is what decides which star the level script spawns. A secret course has no act select, so there the act is left where the game puts it, which is 0. Each course and act keeps its own state and demo (`star-level24-act2.state`).
+Which star it was used to be anyone's guess: the goal was the star count going up. It is now the star's own bit in the save file, `gSaveBuffer.files[0][0].courseStars` at `0x8020770C`, a byte a course and a bit a star, found the same way: taking the slide's star turns on bit 1 of the byte for course 19, the frame the count goes up. That settled something about the slide. **Every slide run on file takes its second star, the one for reaching the bottom inside 21 seconds** — not the box. The HUD timer starts when the sliding does (about frame 83 from the savestate) and stops when the star spawns: 564 frames, 18.8 seconds, on the 786-frame run. Set to 23 seconds just before the bottom, the same route spawns no star at all. So a run from the top of the slide that is slower than 21 seconds gets nothing, however clean its ending.
 
-**When a star is won.** A star is his the frame he touches it, by the star count going up. A star that a box or a boss lets out, or that the slide awards for a time, is *spawned* first: it stops time, plays its cutscene for about a hundred frames while Mario stands frozen in whatever he was doing, and then lands where he can take it. For a while the spawn was the goal — every slide star on file did the same thing at the end, a kick or a ground pound on the box at the bottom, then a hundred frames of nothing, then the star, so ending the episode the frame time stopped took the dead frames out of every success and put the reward on the hit that earned it. The runs below up to the 648-frame slide were measured that way. But a star that has spawned is not yet won, and a policy that stops there has not learned to take it, so **the episode ends the frame he touches the star**, and the demos and fastest folder of a touch are kept apart from the spawn's (`star-level27-act0-touch.demo` beside `star-level27-act0.demo`), since a touch is a hundred frames or more longer and the two are not the same race. A star with no touch on file yet works back along the fastest spawn, which is the same route as far as the box. `sm64_tool replay` still says the frame a star spawned, from the game's time-stop flags in a halfword at `0x8033D482`, found by snapshotting the console's memory before and during the freeze and looking for the one word that goes from 0 to something and stays there — it goes to `0x4A`, which is time stop enabled (2), Mario and doors (8) and active (0x40), and a spawning star is what sets Mario-and-doors in a course (dialog sets a different bit; the doors that set it are in the castle).
-
-Demos kept before that were measured to the touch, about a hundred frames later. `./build/sm64_tool trim [file...]` replays a demo, cuts it where the goal is now reached, and writes it back — renaming a run in a fastest-runs folder for its new length — and `replay` says when a demo wants trimming.
-
-```sh
-SM64_GOAL=star SM64_LEVEL=24 SM64_ACT=2 make sm64-picture ARGS="--env.respawn 1"
-```
+### What a death costs
 
 A death, or any warp out of the course, ends the episode and pays whatever is left of the clock at once, so stopping the clock early is never a way to lose less. That's right where Mario has to go out of his way to die, and wrong in a fortress in the sky: **70% of episodes ended in a death**, most inside the first half of the clock, and each one entered 12 new cubes where a full episode enters 60. Dying in a course throws Mario out of it — back to the castle, one life gone — so the episode really is over as far as the game is concerned.
 
@@ -142,17 +148,17 @@ Returns go positive because novelty earns more than the clock costs, and deaths 
 
 ### Peach's Secret Slide
 
-`SM64_LEVEL=27` is the easiest star in the game to state: the slide drops Mario 6,000 units, the star sits at the bottom of it, and gravity does most of the work. Nothing has to be climbed, fought or timed, and the only way to lose is to go over the side.
+`pss-2` is the easiest star in the game to state: the slide drops Mario 6,000 units, the star appears at the bottom of it, and gravity does most of the work. Nothing has to be climbed or fought, and the only way to lose is to go over the side — or, it turns out, to be slow: it is the star for reaching the bottom inside 21 seconds (see *When a star is won, and which*).
 
 ```sh
-make sm64-slide   # SM64_GOAL=star SM64_LEVEL=27 and respawn = 1
+make sm64-train STAR=pss-2   # stars/pss-2.ini: a 1,500-frame clock and respawn = 1
 ```
 
-It is a secret course, so there is no act select: the game keeps its act at 0, nothing is written over it, and A is not pressed on the way in (`star-level27-act0.state`). Everything else — the clock, novelty, the archive, the demo — is the same as any other course.
+It is a secret course, so there is no act select: the game keeps its act at 0, nothing is written over it, and A is not pressed on the way in. Everything else — the clock, novelty, the archive, the demo — is the same as any other course.
 
 **It is far easier to stumble into.** Go-Explore's first phase, random buttons from the archive, found the star in 60 seconds and four of them in two minutes. The castle door took 200 seconds for its first, and Whomp's Fortress never reached a star at all. `./build/sm64_tool replay` lands the fastest of them on the same frame it was found on.
 
-Eight minutes of it found 40 stars and took the fastest from 1,326 frames to 1,246, so random play from the archive does shorten the way, but slowly. Since then the explorer plays a course differently from the grounds (`make sm64-slide-explore`): A is held and let go like B and Z rather than drawn fresh every step — that was for Lakitu, and a jump every step is the slowest way down a slide — and half the time the stick is redrawn it goes straight ahead, because a course is covered by going somewhere. That version has not been timed against the old one.
+Eight minutes of it found 40 stars and took the fastest from 1,326 frames to 1,246, so random play from the archive does shorten the way, but slowly. Since then the explorer plays a course differently from the grounds (`make sm64-explore`): A is held and let go like B and Z rather than drawn fresh every step — that was for Lakitu, and a jump every step is the slowest way down a slide — and half the time the stick is redrawn it goes straight ahead, because a course is covered by going somewhere. That version has not been timed against the old one.
 
 **Twenty minutes of training** — the star, the clock and novelty, with the archive on and `respawn = 1` — is 3.81M steps at 3,900 a second:
 
@@ -166,7 +172,7 @@ Eight minutes of it found 40 stars and took the fastest from 1,326 frames to 1,2
 
 One star in 2,653 episodes, still climbing at the end. It started from a cube in the archive rather than from the top of the slide, and `start_perf` never left 0. It is a faster star than the explorer's, though — 1,378 frames from the savestate against 1,940, and it replays.
 
-Both are longer than the 900-frame clock, which the archive's replay doesn't spend, so nothing had gone from the top of the slide to the star inside one episode. **The clock was the problem.** `SM64_TRACE=30 ./build/sm64_tool replay` prints where a demo has Mario every thirty frames, and the 1,326-frame star looks like this: 170 frames walking about the top, then 960 frames of sliding from y 6,144 down to y −4,500, the slide winding through six turns on the way, then 200 frames at the bottom before the star. Holding forward does not cover the slide in 600 frames; it covers *half* of it, and flies off the side at the fourth turn. At the pace an explorer slides, the star is 1,100 frames from the top, and the 900-frame clock could never fit it. So this course gets a 1,500-frame clock (`make sm64-slide` and the other slide targets pass `--env.max-ticks 1500`), and every frame of it still costs, so faster is still better.
+Both are longer than the 900-frame clock, which the archive's replay doesn't spend, so nothing had gone from the top of the slide to the star inside one episode. **The clock was the problem.** `SM64_TRACE=30 ./build/sm64_tool replay` prints where a run has Mario every thirty frames, and the 1,326-frame star looks like this: 170 frames walking about the top, then 960 frames of sliding from y 6,144 down to y −4,500, the slide winding through six turns on the way, then 200 frames at the bottom before the star. Holding forward does not cover the slide in 600 frames; it covers *half* of it, and flies off the side at the fourth turn. At the pace an explorer slides, the star is 1,100 frames from the top, and the 900-frame clock could never fit it. So this course gets a 1,500-frame clock (`stars/pss-2.ini`), and every frame of it still costs, so faster is still better.
 
 **Novelty was paying for falling out of the world.** A cube is 500 units, so a fall through empty space enters a fresh one every 500 units down, and each pays `novelty_episode` again in every episode. `sm64_tool probe forward` shows it: at frame 660, off the side of the slide at y −1,675 with no floor under him and nothing below but the death plane, the step paid +0.0678, which is a cube nobody had entered. Worse, those cubes went into the archive, and few runs fall down the same column, so they were among the rarest — which is what it draws first, restarting episodes midway through a fall. In a course whose only way to lose is going over the side, that is paying to lose, twice.
 
@@ -192,30 +198,30 @@ Novelty alone swam the moat for 10M steps. So `sm64.h` also runs [Go-Explore](ht
 
 **Going back is replaying inputs.** The game is deterministic, so the pad inputs from the savestate *are* the place, at a few kilobytes against a savestate's 8 MB. The archive keeps, for every cube, the shortest run of inputs that reached it. With `go_explore` on, that share of episodes picks a cube, weighted to the ones fewest episodes have entered, and replays its run before the clock starts.
 
-**An archive that starts with the runs on file.** The archive is the process's, so every run began with none: thirty minutes on the slide spent the first nine finding the shortcut the run before had found, and what two runs found never met. With `go_explore_seed = 1` the first game to start plays every run on file once — the demo and the folder of the fastest — and offers each cube on the way to the archive, then credits those cubes as on the way to the goal. A run stops being offered the step it reaches the goal, as an episode does, or the cube after it would start episodes with the star already won. On the slide that is 174 cubes from 11 runs in a few seconds, and an hour begun that way (`--env.go-explore 0.9 --env.go-explore-door 0.75`, so nine episodes in ten start from the archive and three quarters of those on a way to the star) touched the star in 9 to 12% of episodes where the hour before managed 1 to 2%. It moved the record from 770 frames to 768. The archive keeps the shortest way to a *place*, and the splice it was seeded for — one run's fast top, another's better jump — needed the jump made from the first run's speed and line, which the policy tried and did not land (`demos/peach-slide/README.md`).
+**An archive that starts with the runs on file.** The archive is the process's, so every run began with none: thirty minutes on the slide spent the first nine finding the shortcut the run before had found, and what two runs found never met. With `go_explore_seed = 1` the first game to start plays every run on file once — the demo, the folder of the fastest and `seeds/` — and offers each cube on the way to the archive, then credits those cubes as on the way to the goal. A run stops being offered the step it reaches the goal, as an episode does, or the cube after it would start episodes with the star already won. On the slide that is 174 cubes from 11 runs in a few seconds, and an hour begun that way (`--env.go-explore 0.9 --env.go-explore-star 0.75`, so nine episodes in ten start from the archive and three quarters of those on a way to the star) touched the star in 9 to 12% of episodes where the hour before managed 1 to 2%. It moved the record from 770 frames to 768. The archive keeps the shortest way to a *place*, and the splice it was seeded for — one run's fast top, another's better jump — needed the jump made from the first run's speed and line, which the policy tried and did not land (`demos/peach-slide/README.md`).
 
 **Racing the archive.** The clock pays for speed only at the star and little: thirty frames off a 770-frame star is 0.02. What a run gets faster by is the archive, which keeps the shortest way into every cube, and that way is a ghost to race. With `ghost` on, the first time in an episode Mario enters a cube that has been on a way to the star, on the ground and sooner than the archive's way into it, he is paid `ghost` a frame of the difference, 0.1 at most. The archive then keeps his way, so the same again pays nothing and only a faster run is ever paid; a run fifty frames up on the ghost is paid at every cube for as long as it stays ahead. Only on the ground, because a jump on its way over the side passes through the cubes of the track below sooner than anything that slid there. At 0.001 a frame it paid 0.0002 an episode and changed nothing; at 0.02 an hour on the slide (`--env.go-explore-seed 1 --env.ghost 0.02`) touched the star in a fifth of its episodes by the end and took the record from 768 frames to 750, with every run in the fastest folder under the 768 it began with. The 750 is the 786's top and speed down the upper track, a new jump off it, and a faster ending (`demos/peach-slide/README.md`). What it does not do is make a landing happen: started on the 786 a second before its jump, the policy beat the ghost in none of 1,500 episodes, and no pay for beating it can teach a jump that never lands.
 
 Scoring from the first minute broke the entropy target. `ent_coef` follows the sum of the gap between entropy and `target_entropy`, and with stars arriving at once entropy answered it late and with hysteresis: it cycled between 0.3 and 4.6 every 700K steps, at a quarter of the rate as well. `ent_coef_damping = 0.5` adds the gap itself to the coefficient, a factor of e for every two of entropy off target, and the same run held 2.1 to 2.9. It is 0, the sum alone, everywhere else.
 
-**Phase 1 without a policy.** `make sm64-explore` is the first phase as the paper ran it: every episode starts from the archive and plays at random. Any exploring run that opens the door writes its inputs to `build/sm64/door.demo`, if nothing on file was faster. It found the door in 200 seconds, and in ten minutes it had opened it 132 times, the fastest in 690 frames (the scripted walk takes 518).
+**Phase 1 without a policy.** `make sm64-explore` is the first phase as the paper ran it: every episode starts from the archive and plays at random. Any exploring run that takes the star writes its inputs to `build/sm64/<star>/fastest.demo`, if nothing on file was faster. On the castle door it found the door in 200 seconds, and in ten minutes it had opened it 132 times, the fastest in 690 frames (the scripted walk takes 518).
 
 It found nothing until episodes were long enough to get through Lakitu. His speech starts and ends in the same cube on the bridge, so the archive can't keep a place partway through it. An episode has to get from the cube before the bridge to the one after it, speech and all. With 300-frame episodes and A held a few steps at a time, 2,300 episodes never got closer to the door than 1,088 units. With 900 frames and A drawn every step, speeches started finishing within a minute.
 
-`./build/sm64_tool replay` plays the demo back in a fresh game and checks the door opens on the same frame. It does, on this savestate and on one remade from scratch. The two files differ in bytes but not in how the game plays.
+`./build/sm64_tool replay` plays the demo back in a fresh game and checks the star is taken on the same frame. The door's did, on its savestate and on one remade from scratch. The two files differ in bytes but not in how the game plays.
 
-**Phase 2: the backward algorithm.** Robustifying uses the backward algorithm ([Salimans and Chen, 2018](https://arxiv.org/abs/1812.03381)), as Go-Explore did. A `backward` share of episodes replay the demo up to a point, the *frontier*, and play from there. The frontier starts `backward_step` (30) frames before the door. Once half of a window of 32 episodes started there open the door, it moves 30 frames further back, until it reaches the start of the demo. The other episodes start where the task does. `make sm64-robustify` turns this on, and turns novelty and the archive off, so the reward is only the door and the clock.
+**Phase 2: the backward algorithm.** Robustifying uses the backward algorithm ([Salimans and Chen, 2018](https://arxiv.org/abs/1812.03381)), as Go-Explore did. A `backward` share of episodes replay the demo up to a point, the *frontier*, and play from there. The frontier starts `backward_step` (30) frames before the goal. Once half of a window of 32 episodes started there reach it, it moves 30 frames further back, until it reaches the start of the demo. The other episodes start where the task does. `make sm64-robustify` turns this on, and turns novelty and the archive off, so the reward is only the star and the clock. What follows was learned on the door.
 
 Driven by the scripted walk instead of a policy, the frontier goes all the way back: 1,369 episodes, 1,369 doors, frontier 690 of 690. A trained policy is another matter. Each of these changes came from a run that failed without it:
 
 - **Rehearsal.** The first run's frontier went from 30 frames to 180 in 165K steps, into Lakitu's speech (348 to 102 frames before the door in this demo), and stopped. Every episode on the demo then started where the policy couldn't yet win, and by 200K steps it played at random (entropy 4.3 of 4.9). Now half the episodes on the demo start anywhere between the frontier and the door, and don't count toward moving it.
 - **The clock.** The second run gave every episode on the demo the whole 900 frames. Most ran all of it and paid −1, entropy fell to 0.01, and the frontier stuck at 120. The next runs started the clock at what the demo's read at that point, and the stable ones stuck at 570: that far back, the explorer's early wandering had already used a hundred frames, so those episodes had less time than a real start. Now an episode on the demo gets as long as the demo took from there plus ten seconds (`DEMO_SLACK`), and never more than the whole clock.
-- **The frontier is a savestate.** Getting to the frontier meant replaying the demo up to it, which costs as many frames as the demo has before that point, and the eight games step in lockstep, so one game replaying holds the other seven. On the slide that was 1,200 frames of demo for an episode 30 frames from the star that itself lasts 330, and training ran at 1,000 steps a second instead of 5,000. So the first episode to reach a point on the demo saves the game there, in a folder named for the demo (`star-level27-act0-states-8d5b4e43/01204.state`), and every episode after loads it: 8 MB read in place of a second of play. Starts are on the frontier's grid of `backward_step` frames — the frontier itself, or for a rehearsal any frontier already passed — so there are as many states as frontiers, about 40 for the slide's demo. The game is deterministic, so which game saved a state makes no difference to what is in it.
+- **The frontier is a savestate.** Getting to the frontier meant replaying the demo up to it, which costs as many frames as the demo has before that point, and the eight games step in lockstep, so one game replaying holds the other seven. On the slide that was 1,200 frames of demo for an episode 30 frames from the star that itself lasts 330, and training ran at 1,000 steps a second instead of 5,000. So the first episode to reach a point on the demo saves the game there, in a folder named for the demo (`build/sm64/pss-2/states-8d5b4e43/01204.state`), and every episode after loads it: 8 MB read in place of a second of play. Starts are on the frontier's grid of `backward_step` frames — the frontier itself, or for a rehearsal any frontier already passed — so there are as many states as frontiers, about 40 for the slide's demo. The game is deterministic, so which game saved a state makes no difference to what is in it.
 - **A run can carry on from another.** The frontier is not in a checkpoint, so a run that loads one (`load_model_path`) used to start its frontier at `backward_step` again. `backward_start` puts it where the last run's got to, in frames before the door; 0 is `backward_step`.
 - **A robustifying run feeds the demo.** Only exploring runs used to offer a door to the demo file. Now a robustifying run does too, so a policy that gets there faster than the demo it started on — from the real start, or from a frontier with the replayed part counted — leaves a faster demo for the next run to work back along. The run under way keeps the demo it read when it started.
 - **The camera.** A replay didn't keep the measured camera offset up to date, so the first stick after any replayed start, from the archive or the demo, was aimed wrong. Replays now track it the way steps do.
 - **The learning rate.** At PufferLib's 0.015, the third run reached 360, then approximate KL hit 0.95 in one epoch and the door rate went to zero. At 0.005 it stays around 0.001.
-- **Entropy.** The first run held entropy at `sm64.ini`'s target of 2.5 and swung between 0.6 and 4.3. `make sm64-robustify` pays a fixed 0.01 instead.
+- **Entropy.** The first run held entropy at `sm64.ini`'s target of 2.5 and swung between 0.6 and 4.3. `make sm64-robustify` pays a fixed price instead (0.01 then, 0.005 since the slide).
 
 **How far it got.** The number that counts is the door rate from the real start. Checkpoints were measured with the demo and archive off, over 100 to 200 episodes each, sampling actions as training does:
 - **Best:** 1.23M steps into the fourth run, a checkpoint opened the door in 68.5% of 200 episodes. The runs that opened it averaged about 680 frames on the clock. The demo took 690, and the scripted walk takes 518.
@@ -227,9 +233,9 @@ So robustifying can learn the whole route from the real start, and doesn't yet h
 
 ### The savestate
 
-A new file opens with Peach's letter, Lakitu's arrival and Mario climbing out of the pipe: about 1500 frames of cutscene that waits on A for its text boxes. No episode should watch that, so it is played through **once** — two presses of Start through the menus, then A until Mario stands in the castle grounds in `ACT_IDLE` — and saved. It takes 0.4 seconds, because the game runs at about 5000 frames a second with nothing drawing it.
+A new file opens with Peach's letter, Lakitu's arrival and Mario climbing out of the pipe: about 1500 frames of cutscene that waits on A for its text boxes. No episode should watch that, so it is played through **once** a star — two presses of Start through the menus, then A until Mario stands in the castle grounds in `ACT_IDLE`, then through the front door into the star's course (see *Picking a star*) — and saved in `build/sm64/<star>/start.state`. It takes 0.4 seconds, because the game runs at about 5000 frames a second with nothing drawing it.
 
-Every episode then begins by putting that state back, which is 8 MB of console memory plus the registers of every thread of the game. `make sm64-state` remakes it; the first run makes it on its own.
+A course holds Mario under its opening camera for a couple of seconds, and a state saved then loads into a game where he never moves at all, so B is pressed every half second until a state, put back, has a Mario who answers the pad: A and the stick change what he is doing or move him. Every episode then begins by putting that state back, which is 8 MB of console memory plus the registers of every thread of the game. `make sm64-state STAR=...` remakes it; the first run makes it on its own.
 
 ### Actions and observations
 
@@ -261,7 +267,7 @@ What it costs, with 8 games on an M4 Pro:
 
 Most of a picture step is RT64: turning the display list into GPU work, then waiting for the GPU. Converting the picture costs next to nothing. A step is two frames and only the second is ever seen, so the env draws only the last frame of each step, and nothing at all while it replays a way to a starting cube. That's safe here because Super Mario 64 draws every frame from nothing. It would be wrong for a game that builds a frame out of the one before it.
 
-Drawing doesn't change how the game plays: `SM64_PICTURE=80x60 ./build/sm64_tool replay` opens the door on the same frame (690) as it does headless, and `SM64_PICTURE=80x60 ./build/sm64_tool bench 8 1000` measures the speed.
+Drawing doesn't change how the game plays: `./build/sm64_tool replay --env.picture-width 80 --env.picture-height 60` takes the star on the same frame as it does headless (the door's opened on the same frame, 690), and `./build/sm64_tool bench 8 1000 --env.picture-width 80 --env.picture-height 60` measures the speed.
 
 A state loaded from a file holds framebuffers in whatever condition the game that saved it left them. So after a load there's no picture (the observation's picture is black) until a frame has been drawn.
 
@@ -297,11 +303,11 @@ An episode ends when the door starts to open, when Mario dies or warps anywhere 
 
 ### Robustifying the slide
 
-`make sm64-slide-robustify` is Go-Explore's second phase on the slide, with the 40 numbers and nothing else in the observation: work back along the fastest star on file, with only the star and the clock paying. Getting it to learn at all took five changes, each from a run that did not:
+`make sm64-robustify STAR=pss-2` is Go-Explore's second phase on the slide, with the 40 numbers and nothing else in the observation: work back along the fastest star on file, with only the star and the clock paying. Getting it to learn at all took five changes, each from a run that did not:
 
 - **The clock**, above: 1,500 frames, because the slide is 1,100 long.
 - **Normalized advantages** (`norm_adv`, see *Against the 4.0 port*): under 5.0's update as it is, 1.5M steps learned nothing and entropy drifted to uniform.
-- **The star is won when it spawns** (see *Another course*): every star on file ended with a kick or a ground pound on the box at the bottom, then a hundred frames frozen while the star came down. Ending the episode at the spawn takes the dead frames out of every success and puts the reward on the move that earned it, fifty decisions sooner.
+- **The star is won when it spawns** (see *When a star is won, and which*; it is the touch again now): every star on file ended with a kick or a ground pound on the box at the bottom, then a hundred frames frozen while the star came down. Ending the episode at the spawn takes the dead frames out of every success and puts the reward on the move that earned it, fifty decisions sooner.
 - **The frontier is a savestate** (see *Go-Explore*): replaying 1,200 frames of demo to start a 330-frame episode ran training at 1,000 steps a second; loading the game there runs it at 5,000.
 - **A finer frontier.** Thirty frames worked for a door Mario walks into. The slide's ending is a speed trick — into the room at 77 units a frame, then a long jump that lands on the box two decisions later — and fifteen decisions of that, exactly, is too much to ask of a policy's first frontier. With 30-frame steps two runs spent 2.4M steps each stuck one frontier into the room, entropy climbing back toward uniform as the failures piled up; and each time the policy found a faster ending, the demo changed under the next run and the room had to be learned again. `--env.backward-step 10` asks for the last five decisions first, then ten.
 
@@ -319,9 +325,9 @@ An episode ends when the door starts to open, when Mario dies or warps anywhere 
 
 Every run stopped where the demo's ending begins. The policy learns the last five, ten, fifteen decisions — the frontier moves through them — and then stalls once the frontier is far enough up the slide that its own sliding changes the state it arrives in, because the ending only works from the state the demo arrived in. At each stall entropy climbed back from 2.3 toward 4 as the failures piled up, which is the door's collapse again. The slide itself was never the problem: from any frontier state, holding the stick ahead slides into the room.
 
-So what the slide wants next is a demo with a robust ending — stop in the room, get under the box, jump — the way the door's demo ends with a walk into a door. `./build/sm64_tool probe door` is a scripted walk for the door; the box wants the same, or an explorer that stops. Given that, the frontier should run up the slide at a window an episode, since sliding generalizes and the box does not.
+So what the slide wants next is a demo with a robust ending — stop in the room, get under the box, jump — the way the door's demo ends with a walk into a door. The door had a scripted walk; the box wants the same, or an explorer that stops. Given that, the frontier should run up the slide at a window an episode, since sliding generalizes and the box does not.
 
-What the runs leave behind is worth watching anyway: `SM64_GOAL=star SM64_LEVEL=27 ./build/sm64_tool replay watch` plays the 936-frame star — 31 seconds from the savestate to the box, where the explorer's took 1,326 to the touch — and then five seconds more, so the star comes down.
+What the runs leave behind is worth watching anyway: `make sm64-replay STAR=pss-2` plays the fastest on file, and the runs in `demos/peach-slide/` play with `./build/sm64_tool replay watch <file> --env.star pss-2`. The 936-frame star of that time was 31 seconds from the savestate to the bottom, where the explorer's took 1,326 to the touch; watched, a replay plays five seconds more, so the star comes down.
 
 ### What this needed from the runtime
 
@@ -363,7 +369,7 @@ cargo build --release
 
 `vecenv.c` is 5.0's CPU vecenv without the CUDA around it. `build.sh` compiles it around an env into `build/vecenv_<env>.dylib`, and the trainer loads that (`src/vecenv.rs`): the env steps on CPU threads, the policy on the GPU.
 
-Configs and flags work as they do in 5.0: `vendor/PufferLib/config/default.ini`, then `envs/<env>/<env>.ini`, then `--section.key=value` flags, where a space works as well as `=`. Only keys a config already has can be set.
+Configs and flags work as they do in 5.0: `vendor/PufferLib/config/default.ini`, then `envs/<env>/<env>.ini`, then `--section.key=value` flags, where a space works as well as `=`. Only keys a config already has can be set. One addition: `--config FILE` loads another config over the env's, before any flag, with the same rule — a variant of the env, like one of sm64's stars (`envs/sm64/stars/pss-2.ini`).
 
 Training writes checkpoints to `checkpoints/<env>/<run_id>/` and, at the end, `logs/<env>/<run_id>.ini`: the config and a downsampled `[metrics]` section. With `eval_episodes` above 0, it finishes by playing the final policy in fresh episodes until that many have ended. `eval` shows one env in a window, or with `--headless` plays `eval_episodes` episodes and prints the score. `latest` is the env's most trained checkpoint.
 
@@ -427,7 +433,7 @@ Robustifying the slide made that a wall rather than a slope. With only the star 
 | `vf_coef` 0.5 (stopped at 0.7M, the same) | 4.83–4.89 | 150 |
 | advantages normalized | 4.4–4.7 | 180 |
 
-The first two never learned anything: entropy drifted *up* toward the 4.91 of a uniform policy, and the frontier sat where random play alone gets it. So `norm_adv = 1` in `[train]` normalizes each minibatch's advantages as 4.0 did. It is off by default and in `sm64.ini`, so the trainer stays 5.0's unless a run asks; `make sm64-slide-robustify` asks.
+The first two never learned anything: entropy drifted *up* toward the 4.91 of a uniform policy, and the frontier sat where random play alone gets it. So `norm_adv = 1` in `[train]` normalizes each minibatch's advantages as 4.0 did. It is off by default and in `sm64.ini`, so the trainer stays 5.0's unless a run asks; `make sm64-robustify` asks.
 
 ## Setup
 
@@ -438,7 +444,7 @@ On a Mac, OpenMP too, which Apple's clang doesn't ship, and for sm64 cmake, ninj
 ```sh
 brew install libomp cmake ninja
 cp ~/roms/sm64.z64 .
-make sm64-slide      # builds N64Bundler and the game the first time, then trains
+make sm64-train      # builds N64Bundler and the game the first time, then trains on pss-2
 ```
 
 On Linux (Debian and Ubuntu package names; run on arm64, and x86-64 is written for and has not been run):
@@ -447,7 +453,7 @@ On Linux (Debian and Ubuntu package names; run on arm64, and x86-64 is written f
 sudo apt install build-essential clang cmake ninja-build git curl python3 libsdl2-dev \
     libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl-dev
 cp ~/roms/sm64.z64 .
-make sm64-slide
+make sm64-train
 ```
 
 - **The trainer** runs on whatever Vulkan device there is. A machine with no GPU can still train on Mesa's CPU driver (`libvulkan1 mesa-vulkan-drivers`): the network is small and sm64 is bound by the games, so it is slower rather than stuck: 1,600 steps a second in an arm64 Linux VM on an M4 Pro, where macOS on the same machine does about 5,000 on Metal.
