@@ -78,7 +78,7 @@ does not land.
 
 ## The touch: 750 frames
 
-`star-750-touch.demo` is the fastest touch on record: the star is his on frame
+`star-750-touch.demo` was the fastest touch on record until the 674 below: the star is his on frame
 750, 25.0 seconds from the savestate. `star-750-touch.mp4` is its video and
 `route-750-touch.txt` its trace. It came 40 minutes into an hour of
 `make sm64-slide` with the archive seeded from the runs on file and the ghost
@@ -102,6 +102,41 @@ the fastest folder all 750 to 764: every run in it under the 768 it began with.
 The 770's long flight from this top, landing at 412 two turns further down,
 would be in the box near 580 and worth another forty frames or so. Still none
 from the top of the slide.
+
+## The touch: 674 frames
+
+`star-674-touch.demo` is the fastest touch on record: the star is his on frame
+674, 22.5 seconds from the savestate, in 337 inputs. `star-674-touch.mp4` is its
+video and `route-674-touch.txt` its trace. It came in the second of two
+back-to-back hours of `make sm64-slide` on 2026-09-17 evening, both with the
+archive seeded from the runs on file and the ghost paying, each loading the last
+checkpoint of the one before. The first hour took the record 750 to 746 to 736;
+the second found 724, 714, 712, 700, 690, 686, 684 and finally 674 in its last
+twenty minutes, the whole pack moving down together.
+
+It is the long flight, and further than anyone had it. Its first 60 frames off
+the start are the 750's exactly, and it holds the sliding cap down the upper
+track the way the 750 does, arriving at the end of it within a couple of hundred
+units and a frame or two of where the 750 is. Then it takes the
+turn at the end of the upper track backwards, sliding at 72 to 81 units a frame
+with his back to the way he is going from frame 240 to 276, swings around to
+face forward, and jumps at frame 296 -- 36 frames later than the 750 and a
+little further along. The fall is the whole of the difference: three and a half
+seconds in the air, from a height of 3,220 down to minus 3,529, landing on the
+lower track at frame 412 at x -3,816. The 750's shorter jump lands at frame 360
+but up at x +1,604, with two thirds of the lower track still to run. The 674
+lands past all of that and is in the box at frame 541, where the 750 took 630.
+The ending is the same as every run's: about 110 frames frozen while the star
+comes out, and the star about twenty frames after.
+
+So it is 52 frames slower into the landing and 89 frames faster out of it. The
+note's estimate for this line from the 750's approach was a star near 710; it
+came in 36 frames under that, because the flight also carried him past the two
+turns the 770 still had to slide.
+
+The fastest folder is now 674 to 716, all of this family, and the 750 family is
+out of it. Still none from the top of the slide: like every record before it,
+this is a run the archive assembled from starts partway down.
 
 Everything below applies to these the same way, with the file name in place of
 `star-648.demo`.
