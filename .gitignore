@@ -2,7 +2,7 @@
 
 # build.sh output: raylib, the recompiled game, the trainer
 build/
-puffer
+puffer_*
 
 # puffer train output
 checkpoints/

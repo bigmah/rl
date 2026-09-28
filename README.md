@@ -2,6 +2,8 @@
 
 Super Mario 64's Peach's Secret Slide, trained with [PufferLib](https://github.com/PufferAI/PufferLib) 5.0's own CUDA trainer, on arm64 Linux with an NVIDIA GPU (a GH200 or any other Grace or arm64 box).
 
+There's also a small 2D platformer (`envs/platformer/`) built the same way. It needs no ROM, builds in a minute and trains in a few, which makes it a quick way to check that a new GPU box works.
+
 This branch is not `main`. There's no Rust or wgpu trainer here, and no novelty, Go-Explore or demos in the reward. The trainer is PufferLib's `pufferl.cu`, unmodified, with the env compiled in. The env's observation is everything about Mario that can be read out of memory, and its reward is the star's location and nothing else.
 
 The game is the real cartridge. [N64Bundler](https://github.com/bigmah/n64bundler) statically recompiles your ROM into native arm64, and each agent runs its own copy of the game in a process of its own. That's why the box has to be arm64: the recompiled game is arm64 code.
@@ -17,24 +19,39 @@ sudo apt install build-essential clang cmake ninja-build git curl python3 ccache
 sudo apt install libnccl2 libnccl-dev
 
 git clone -b core-cuda --recurse-submodules https://github.com/bigmah/rl.git rl && cd rl
-cp /path/to/sm64.z64 .            # or: export SM64_ROM=/path/to/sm64.z64
 export PATH=/usr/local/cuda/bin:$PATH
+```
 
-make build     # N64Bundler, the game recompiled from your ROM, ./puffer, build/sm64_check
+Check the box first with the platformer. It needs no ROM and no N64Bundler.
+
+```sh
+make train ENV=platformer   # builds ./puffer_platformer, then 20M steps
+make eval ENV=platformer    # score the most trained checkpoint, headless
+```
+
+Its `perf` is the fraction of episodes that reach the flag. On `main`'s wgpu port of this same trainer, 20M steps reached 99.7%.
+
+Then the slide:
+
+```sh
+cp /path/to/sm64.z64 .      # or: export SM64_ROM=/path/to/sm64.z64
+make build     # N64Bundler, the game recompiled from your ROM, ./puffer_sm64, build/sm64_check
 make check     # the record run played through the reward: should end "the star" at frame 674
 make bench     # agent steps a second with 32 games on random actions
-make train     # ./puffer train, checkpoints in checkpoints/sm64/<run id>/
+make train     # ./puffer_sm64 train, checkpoints in checkpoints/sm64/<run id>/
 make eval      # score the most trained checkpoint, headless
 ```
 
-The first `make build` takes a few minutes: it builds N64Bundler and raylib (which has no arm64 release, so it's built from source), recompiles the game in about twenty seconds, and then compiles the trainer with nvcc. Later builds find the first three done.
+`ENV` defaults to `sm64`. Each env builds its own binary, `./puffer_<env>`, so building one leaves the other as it was.
+
+The first sm64 build takes a few minutes: it builds N64Bundler and raylib (which has no arm64 release, so it's built from source), recompiles the game in about twenty seconds, and then compiles the trainer with nvcc. Later builds find the first three done.
 
 Flags go to the trainer as `--section.key=value`, which is PufferLib's syntax:
 
 ```sh
 make train ARGS="--train.total-timesteps=200_000_000 --vec.total-agents=64 --vec.num-threads=64 --train.minibatch-size=4096"
-./puffer train --train.learning-rate=0.005
-./puffer eval checkpoints/sm64/<run id>/<step>.bin --headless
+./puffer_sm64 train --train.learning-rate=0.005
+./puffer_sm64 eval checkpoints/sm64/<run id>/<step>.bin --headless
 ```
 
 The build's own knobs are environment variables: `NVCC_ARCH` (default `native`; set `sm_90` to build on a machine without the GPU), `PRECISION=float` for fp32 instead of bf16, `CUDA_HOME`, `SM64_ROM` and `N64BUNDLER`.
@@ -96,12 +113,13 @@ This is the env with no trainer and no GPU. It reads the same config from the sa
 envs/sm64/sm64.h        the env: PufferLib 5.0's env API, compiled into pufferl.cu
 envs/sm64/n64b_gym.h    one recompiled game in a process of its own, driven from here
 envs/sm64/sm64_check.c  the env without the trainer
-config/sm64.ini         the env's and trainer's settings, over config/default.ini
+envs/platformer/        platformer.h (the env), platformer.c (play it: make play, needs a display)
+config/<env>.ini        each env's and trainer's settings, over config/default.ini
 config/default.ini      -> vendor/PufferLib/config/default.ini
-build.sh                the game, sm64_check, and ./puffer
+build.sh [env]          ./puffer_<env>, and for sm64 the game and sm64_check
 demos/peach-slide/      the record runs from main
 vendor/PufferLib        submodule, branch 5.0: the trainer
 vendor/n64bundler       submodule: the recompiler and the host the game runs in
 ```
 
-`./puffer` reads its config from `config/` in the directory it's run in, so run it from the top of the checkout. `build/`, `puffer`, `checkpoints/`, `logs/` and ROMs are gitignored.
+`./puffer_<env>` reads its config from `config/` in the directory it's run in, so run it from the top of the checkout. `build/`, `puffer_*`, `checkpoints/`, `logs/` and ROMs are gitignored.
