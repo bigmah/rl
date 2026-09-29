@@ -10,6 +10,8 @@ The game is the real cartridge. [N64Bundler](https://github.com/bigmah/n64bundle
 
 ## On the box
 
+[`vps_kickoff.md`](vps_kickoff.md) is the step-by-step for a fresh box, with what each step should print and what to do when it doesn't. In short:
+
 You need an arm64 Linux machine with an NVIDIA driver, the CUDA toolkit (12.x, with `nvcc`) and NCCL, plus your own dump of Super Mario 64 (USA).
 
 ```sh
